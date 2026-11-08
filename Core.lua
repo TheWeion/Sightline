@@ -27,9 +27,9 @@ ns.version = "1.0.0"
 
 ns.BANDS = { "far", "mid", "near" }
 ns.BAND_INFO = {
-    far  = { label = "Far",  color = { 1.00, 0.82, 0.00 }, desc = "Terrain and horizon. Walls and buildings block these first." },
-    mid  = { label = "Mid",  color = { 0.40, 0.75, 1.00 }, desc = "Building and object detail. Partly visible between buildings." },
-    near = { label = "Near", color = { 0.45, 0.90, 0.45 }, desc = "Ground clutter and characters. Still visible right beside you." },
+    far  = { label = "Far",  color = { 1.00, 0.82, 0.00 }, desc = "Terrain and horizon. Walls block these first." },
+    mid  = { label = "Mid",  color = { 0.40, 0.75, 1.00 }, desc = "Buildings and object detail nearby." },
+    near = { label = "Near", color = { 0.45, 0.90, 0.45 }, desc = "Ground clutter and characters around you." },
 }
 
 -- Known view-distance CVars. Any not present in this client are skipped.
@@ -115,7 +115,10 @@ local DEFAULTS = {
         maxFactor     = 1.30,  -- highest FPS adjustment when allowAbove is on
         pauseInCombat = true,
         failCooldown  = 90,    -- seconds before retrying a direction that gave no gain
+        autoCalibrate = true,  -- calibrate every subzone even without a target FPS
+        minFps        = 60,    -- goal when no target FPS is set
     },
+    calibrations = {},         -- ["zone|subzone|env"] = { factor, fps, status, locked, ... }
 }
 
 -- How strongly the FPS adjustment applies to each band. Far settings cost the
@@ -139,7 +142,7 @@ ns.state = {
     pending = false,
     lastWrite = 0,
     fps = {
-        status = "Off", phase = "idle", key = nil,
+        status = "Off", phase = "idle", key = nil, zone = nil, calibrated = false,
         factor = 1, trial = nil, trialDir = nil,
         avg = nil, before = nil,
         sum = 0, count = 0,
@@ -377,23 +380,36 @@ local function NeedsWrite()
 end
 
 ---------------------------------------------------------------------------
--- Target FPS controller
+-- FPS calibration
 --
--- Measures average FPS. When it's outside the target range it tests one step
--- (lower distances if FPS is low, higher if FPS is high), waits for terrain to
--- finish loading, and measures again:
---   * lowering kept only if FPS improved noticeably, otherwise reverted
---   * raising kept only if FPS stays at or near the target, otherwise reverted
--- A direction that gave nothing isn't retried for a while. Results are
--- remembered per environment and zone for the session.
+-- Every spot (zone + subzone + environment) gets its own calibration: an
+-- adjustment on top of the surroundings-based scaling, saved between sessions.
+-- Goal: at least db.fps.minFps (default 60), or around db.fps.target when a
+-- target FPS is set.
+--
+-- Entering a spot with no calibration: measure FPS, then test one step at a
+-- time until FPS meets the goal or a limit is reached.
+--   * a lower step is kept only if FPS rose noticeably, otherwise reverted
+--   * a higher step is kept only if FPS stays at the goal, otherwise reverted
+-- Calibrated spots keep being watched. If FPS falls below the goal, the spot
+-- is recalibrated starting from its stored value; if that gives no real gain,
+-- the stored value stays. Locked calibrations are never changed automatically.
 ---------------------------------------------------------------------------
 
-local fpsMemory = {}
+local EPS = 0.001
+
+function ns.PlaceName(c)
+    if not c then return "?" end
+    local name = (c.zone ~= "" and c.zone or "Unknown")
+    if c.subzone and c.subzone ~= "" then name = name .. " - " .. c.subzone end
+    return name
+end
 
 local function FpsLog(msg)
     local h = ns.state.fps.history
-    table.insert(h, 1, date("%H:%M:%S") .. "  " .. msg)
-    while #h > 8 do table.remove(h) end
+    local place = ns.PlaceName({ zone = ns.state.zone, subzone = ns.state.subzone })
+    table.insert(h, 1, date("%H:%M") .. "  " .. place .. ": " .. msg)
+    while #h > 12 do table.remove(h) end
     Debug("FPS: " .. msg)
 end
 
@@ -402,105 +418,184 @@ local function ResetSamples()
     fs.sum, fs.count = 0, 0
 end
 
+function ns.CalibrationActive()
+    return db.enabled and (db.fps.enabled or db.fps.autoCalibrate)
+end
+
+-- goal, lower bound, upper bound, mode
+function ns.FpsGoal()
+    local f = db.fps
+    if f.enabled then
+        return f.target, f.target * (1 - f.tolerance), f.target * (1 + f.tolerance), "target"
+    end
+    return f.minFps, f.minFps * 0.97, f.minFps * (1 + f.tolerance), "minimum"
+end
+
 function ns.MaxFpsFactor()
-    return db.fps.allowAbove and db.fps.maxFactor or 1.0
+    -- Going above the player's own settings is only offered with a target FPS.
+    return (db.fps.enabled and db.fps.allowAbove) and db.fps.maxFactor or 1.0
 end
 
 function ns.FpsFactor()
     local fs = ns.state.fps
+    if not ns.CalibrationActive() then return 1 end
     return fs.trial or fs.factor
 end
 
-local function StartTrial(dir, now)
+local function Pc(x) return math.floor(x * 100 + 0.5) end
+
+local function SaveCal(calStatus)
+    local fs, st = ns.state.fps, ns.state
+    if not fs.key then return end
+    local c = db.calibrations[fs.key]
+    if not c then
+        c = { zone = st.zone, subzone = st.subzone, env = st.envKey, envLabel = st.envLabel, tests = 0 }
+        db.calibrations[fs.key] = c
+    end
+    c.factor = math.floor(fs.factor * 100 + 0.5) / 100
+    if fs.avg then c.fps = math.floor(fs.avg * 10 + 0.5) / 10 end
+    c.goal = (ns.FpsGoal())
+    c.status = calStatus
+    c.updated = time()
+    c.pending = nil
+end
+
+local function Settle(live, calStatus)
+    local fs = ns.state.fps
+    fs.status = live
+    if not fs.calibrated then FpsLog(("calibrated at %d%% (%.0f fps)"):format(Pc(fs.factor), fs.avg or 0)) end
+    fs.calibrated = true
+    SaveCal(calStatus)
+end
+
+local function StartTrial(dir)
     local f, fs = db.fps, ns.state.fps
     fs.before = fs.avg
     fs.trialDir = dir
-    fs.trial = Clamp(fs.factor + (dir == "down" and -f.step or f.step), f.minFactor, ns.MaxFpsFactor())
+    local hi = dir == "restore" and 1 or ns.MaxFpsFactor()
+    fs.trial = Clamp(math.floor((fs.factor + (dir == "down" and -f.step or f.step)) * 100 + 0.5) / 100, f.minFactor, hi)
     fs.phase = "trial"
     ResetSamples()
-    fs.status = dir == "down" and "Testing lower distances" or "Testing higher distances"
+    local verb = dir == "restore" and "Restoring"
+        or (fs.calibrated and (dir == "down" and "Recalibrating" or "Fine-tuning") or "Calibrating")
+    fs.status = ("%s: testing %d%%"):format(verb, Pc(fs.trial))
+    local c = db.calibrations[fs.key]
+    if c and fs.calibrated and dir == "down" then c.status = "Recalibrating" end
 end
 
 local function FinishTrial(avg, now)
     local f, fs = db.fps, ns.state.fps
+    local goal, low, high, mode = ns.FpsGoal()
     local before = fs.before or avg
+    local c = db.calibrations[fs.key]
+    if c then c.tests = (c.tests or 0) + 1 end
+
     if fs.trialDir == "down" then
-        local gain = avg - before
-        if gain >= math.max(2, before * f.gain) then
+        if avg - before >= math.max(2, before * f.gain) then
             fs.factor = fs.trial
-            FpsLog(("Lower to %d%%: %.0f -> %.0f fps. Kept."):format(math.floor(fs.factor * 100 + 0.5), before, avg))
+            FpsLog(("lowered to %d%%: %.0f -> %.0f fps, kept"):format(Pc(fs.factor), before, avg))
         else
             fs.cooldownDown = now + f.failCooldown
-            FpsLog(("Lower to %d%%: %.0f -> %.0f fps, no real gain. Reverted."):format(math.floor(fs.trial * 100 + 0.5), before, avg))
+            FpsLog(("lowered to %d%%: %.0f -> %.0f fps, no real gain, reverted to %d%%"):format(Pc(fs.trial), before, avg, Pc(fs.factor)))
+            avg = before -- the stored value's reading still stands
         end
-    else
-        local low = f.target * (1 - f.tolerance / 2)
-        if avg >= low then
+    elseif fs.trialDir == "restore" then
+        -- Lowering wasn't helping here, so take view distance back if it costs nothing.
+        if avg >= before - math.max(2, before * f.gain) then
             fs.factor = fs.trial
-            FpsLog(("Raise to %d%%: still %.0f fps. Kept."):format(math.floor(fs.factor * 100 + 0.5), avg))
+            FpsLog(("restored to %d%%: %.0f -> %.0f fps, no real cost, kept"):format(Pc(fs.factor), before, avg))
         else
             fs.cooldownUp = now + f.failCooldown
-            FpsLog(("Raise to %d%%: fell to %.0f fps. Reverted."):format(math.floor(fs.trial * 100 + 0.5), avg))
+            FpsLog(("restored to %d%%: %.0f -> %.0f fps, reverted to %d%%"):format(Pc(fs.trial), before, avg, Pc(fs.factor)))
+            avg = before
+        end
+    else
+        local keepAt = mode == "minimum" and goal or goal * (1 - f.tolerance / 2)
+        if avg >= keepAt then
+            fs.factor = fs.trial
+            FpsLog(("raised to %d%%: %.0f fps, kept"):format(Pc(fs.factor), avg))
+        else
+            fs.cooldownUp = now + f.failCooldown
+            FpsLog(("raised to %d%%: fell to %.0f fps, reverted to %d%%"):format(Pc(fs.trial), avg, Pc(fs.factor)))
+            avg = before
         end
     end
-    fpsMemory[fs.key] = fs.factor
+    fs.avg = avg
     fs.trial, fs.trialDir = nil, nil
     fs.phase = "measure"
     ResetSamples()
+    if fs.calibrated then SaveCal(c and c.status or "Calibrated") end
 end
 
 local function Decide(avg, now)
     local f, fs = db.fps, ns.state.fps
-    local tol = f.target * f.tolerance
-    if avg < f.target - tol then
-        if fs.factor <= f.minFactor + 0.001 then
-            fs.status = "Below target, at lowest allowed"
-        elseif now < fs.cooldownDown then
-            fs.status = "Below target, lowering didn't help"
+    local goal, low, high, mode = ns.FpsGoal()
+    if avg < low then
+        local atLowest = fs.factor <= f.minFactor + EPS
+        if atLowest or now < fs.cooldownDown then
+            -- Can't (usefully) go lower. If raising costs nothing, the
+            -- reduction isn't helping here, so take view distance back.
+            if fs.factor < 1 - EPS and now >= fs.cooldownUp then
+                StartTrial("restore")
+            elseif atLowest then
+                Settle("Below goal, at lowest allowed", "At lowest")
+            else
+                Settle("Below goal, lowering didn't help", "No gain")
+            end
         else
-            StartTrial("down", now)
+            StartTrial("down")
         end
-    elseif avg > f.target + tol then
-        if fs.factor >= ns.MaxFpsFactor() - 0.001 then
-            fs.status = db.fps.allowAbove and "Above target, at highest allowed" or "Above target, at your full settings"
-        elseif now < fs.cooldownUp then
-            fs.status = "Above target, raising cost too much"
-        else
-            StartTrial("up", now)
-        end
+    elseif avg > high and fs.factor < ns.MaxFpsFactor() - EPS and now >= fs.cooldownUp then
+        StartTrial("up")
+    elseif avg > high then
+        Settle(fs.factor >= 1 - EPS and "Above goal at full distance" or "Above goal, raising cost too much", "Calibrated")
     else
-        fs.status = "On target"
+        Settle("On goal", "Calibrated")
+    end
+end
+
+local function EnterSpot(key)
+    local fs, st = ns.state.fps, ns.state
+    fs.key, fs.zone = key, st.zone
+    fs.trial, fs.trialDir, fs.before, fs.avg = nil, nil, nil, nil
+    fs.cooldownDown, fs.cooldownUp = 0, 0
+    fs.phase = "measure"
+    ResetSamples()
+    local c = db.calibrations[key]
+    if c then
+        fs.factor = c.factor or 1
+        fs.calibrated = not c.pending
+        fs.status = c.locked and "Locked" or (c.pending and "Recalibrating" or "Checking")
+    else
+        -- New spot: start from the normal scaled values.
+        fs.factor = 1
+        fs.calibrated = false
+        fs.status = "Calibrating"
     end
 end
 
 local function FpsController(now, landed)
-    local f, fs = db.fps, ns.state.fps
-    if not f.enabled or not db.enabled then
-        fs.factor, fs.trial, fs.trialDir, fs.phase = 1, nil, nil, "idle"
-        fs.status = f.enabled and "Paused" or "Off"
-        fs.key = nil
+    local f, fs, st = db.fps, ns.state.fps, ns.state
+    if not ns.CalibrationActive() then
+        fs.factor, fs.trial, fs.trialDir, fs.phase, fs.key = 1, nil, nil, "idle", nil
+        fs.status = db.enabled and "Off" or "Paused"
         ResetSamples()
         return
     end
 
-    -- New environment or zone: drop any test and use what worked here before.
-    local key = ns.state.envKey .. "|" .. ns.state.zone
-    if key ~= fs.key then
-        fs.key = key
-        fs.factor = fpsMemory[key] or 1
-        fs.trial, fs.trialDir = nil, nil
-        fs.cooldownDown, fs.cooldownUp = 0, 0
-        fs.phase = "measure"
-        ResetSamples()
-    end
+    local key = st.zone .. "|" .. st.subzone .. "|" .. st.envKey
+    if key ~= fs.key then EnterSpot(key) end
+
+    local c = db.calibrations[key]
+    if c and c.locked and fs.factor ~= c.factor then fs.factor = c.factor end
 
     if f.pauseInCombat and UnitAffectingCombat("player") then
         fs.status = "Paused in combat"
         ResetSamples()
         return
     end
-    if not landed or now - ns.state.lastWrite < f.settleTime then
-        if fs.phase ~= "trial" then fs.status = "Settling" end
+    if not landed or now - st.lastWrite < f.settleTime then
+        if fs.phase ~= "trial" and not (c and c.locked) then fs.status = fs.calibrated and "Settling" or "Calibrating" end
         ResetSamples()
         return
     end
@@ -510,13 +605,72 @@ local function FpsController(now, landed)
     if fs.count * db.tickInterval < f.sampleTime then return end
 
     local avg = fs.sum / fs.count
-    fs.avg = avg
     ResetSamples()
+    if c and c.locked then
+        fs.avg = avg
+        fs.status = "Locked"
+        return
+    end
     if fs.phase == "trial" then
         FinishTrial(avg, now)
     else
+        fs.avg = avg
         Decide(avg, now)
     end
+end
+
+-- Changes from the Calibrations tab ---------------------------------------
+
+function ns.CurrentCalKey() return ns.state.fps.key end
+
+function ns.SetCalibration(key, factor, locked)
+    local c = db.calibrations[key]
+    if not c then return end
+    if factor then
+        c.factor = Clamp(factor, db.fps.minFactor, math.max(1, ns.MaxFpsFactor()))
+        c.status = "Manual"
+        c.updated = time()
+    end
+    if locked ~= nil then
+        c.locked = locked and true or nil
+        if not locked and c.status == "Manual" then c.status = "Calibrated" end
+    end
+    local fs = ns.state.fps
+    if key == fs.key then
+        fs.factor = c.factor
+        fs.trial, fs.trialDir, fs.phase = nil, nil, "measure"
+        ResetSamples()
+    end
+    ns.Refresh()
+end
+
+function ns.Recalibrate(key)
+    local c = db.calibrations[key]
+    if not c then return end
+    c.pending, c.locked = true, nil
+    c.status = "Recalibrating"
+    if key == ns.state.fps.key then ns.state.fps.key = nil end -- re-enter with stored value as start
+    ns.Refresh()
+end
+
+function ns.DeleteCalibration(key)
+    db.calibrations[key] = nil
+    if key == ns.state.fps.key then
+        ns.state.fps.key = nil
+        ns.state.fps.factor = 1
+    end
+    ns.Refresh()
+end
+
+function ns.ClearCalibrations()
+    wipe(db.calibrations)
+    ns.state.fps.key = nil
+    ns.state.fps.factor = 1
+    ns.Refresh()
+end
+
+function ns.RecalibrateAll()
+    for key in pairs(db.calibrations) do ns.Recalibrate(key) end
 end
 
 -- Band scales after the FPS adjustment.
@@ -587,7 +741,7 @@ end
 
 function ns.ResetSettings()
     ns.RestoreBaselines()
-    local keep = { baselines = db.baselines, minimap = db.minimap, window = db.window }
+    local keep = { baselines = db.baselines, minimap = db.minimap, window = db.window, calibrations = db.calibrations }
     wipe(db)
     CopyDefaults(DEFAULTS, db)
     for k, v in pairs(keep) do db[k] = v end
