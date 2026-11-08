@@ -3,7 +3,7 @@
 ## Notes: Adaptive view distance. Scales each view-distance setting to how much of the world you can actually see.
 ## Author: TheWeion
 ## Version: 1.0.0
-## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
+## IconTexture: Interface\AddOns\Sightline\Media\Icon
 ## SavedVariables: SightlineDB
 
 Core.lua

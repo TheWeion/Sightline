@@ -4,6 +4,7 @@
 
 local ADDON_NAME, ns = ...
 
+ns.ICON = "Interface\\AddOns\\Sightline\\Media\\Icon"
 local TEMPLATE = BackdropTemplateMixin and "BackdropTemplate" or nil
 local W, H = 660, 540
 local atan2 = math.atan2 or math.atan
@@ -920,10 +921,10 @@ local function CreateWindow()
     subtitle:SetPoint("TOP", 0, -26)
 
     local icon = window:CreateTexture(nil, "ARTWORK")
-    icon:SetTexture("Interface\\Icons\\INV_Misc_Spyglass_03")
+    icon:SetTexture(ns.ICON)
     icon:SetSize(22, 22)
     icon:SetPoint("TOPLEFT", 20, -18)
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    icon:SetTexCoord(0.04, 0.96, 0.04, 0.96)
 
     local close = CreateFrame("Button", nil, window, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -6, -6)
@@ -978,9 +979,9 @@ local function CreateMinimapButton()
     bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
     bg:SetSize(20, 20); bg:SetPoint("TOPLEFT", 7, -5)
     local icon = mini:CreateTexture(nil, "ARTWORK")
-    icon:SetTexture("Interface\\Icons\\INV_Misc_Spyglass_03")
+    icon:SetTexture(ns.ICON)
     icon:SetSize(18, 18); icon:SetPoint("TOPLEFT", 7, -6)
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    icon:SetTexCoord(0.04, 0.96, 0.04, 0.96)
     local border = mini:CreateTexture(nil, "OVERLAY")
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
     border:SetSize(53, 53); border:SetPoint("TOPLEFT")

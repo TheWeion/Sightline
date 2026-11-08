@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a1230"/>
+      <stop offset="0.45" stop-color="#22305e"/>
+      <stop offset="0.62" stop-color="#7a4a5e"/>
+      <stop offset="0.72" stop-color="#e59a3c"/>
+    </linearGradient>
+    <radialGradient id="sunglow" cx="256" cy="262" r="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff2b8" stop-opacity="0.95"/>
+      <stop offset="0.25" stop-color="#ffd34d" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#ff9a2e" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sun" cx="256" cy="250" r="46" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fffbe6"/>
+      <stop offset="0.6" stop-color="#ffd85a"/>
+      <stop offset="1" stop-color="#f0a020"/>
+    </radialGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d9b25a"/><stop offset="1" stop-color="#8a6a3a"/>
+    </linearGradient>
+    <linearGradient id="mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b8fc4"/><stop offset="1" stop-color="#22405f"/>
+    </linearGradient>
+    <linearGradient id="near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f8a45"/><stop offset="1" stop-color="#0c2412"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff0a8"/><stop offset="0.5" stop-color="#ffcc33"/><stop offset="1" stop-color="#b8780f"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="256" cy="230" r="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0.55" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.75"/>
+    </radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="3"/></filter>
+    <clipPath id="eye"><path d="M40 250 Q256 70 472 250 Q256 430 40 250 Z"/></clipPath>
+  </defs>
+
+  <!-- sky -->
+  <rect width="512" height="512" fill="url(#sky)"/>
+  <!-- stars -->
+  <g fill="#fff" opacity="0.8">
+    <circle cx="70" cy="60" r="2.5"/><circle cx="150" cy="35" r="1.8"/><circle cx="420" cy="55" r="2.6"/>
+    <circle cx="350" cy="30" r="1.6"/><circle cx="470" cy="120" r="1.8"/><circle cx="35" cy="140" r="1.6"/>
+  </g>
+  <!-- sun glow and setting sun -->
+  <circle cx="256" cy="262" r="190" fill="url(#sunglow)"/>
+  <circle cx="256" cy="250" r="46" fill="url(#sun)"/>
+
+  <!-- far ridge (gold band) -->
+  <path d="M0 300 L60 262 L110 285 L170 240 L210 270 L256 300 L302 272 L350 236 L405 280 L455 252 L512 288 L512 512 L0 512 Z" fill="url(#far)" opacity="0.92"/>
+  <!-- mid ridge (blue band) -->
+  <path d="M0 338 L55 300 L120 336 L190 286 L255 330 L320 296 L380 334 L440 300 L512 330 L512 512 L0 512 Z" fill="url(#mid)"/>
+  <!-- near ridge (green band) -->
+  <path d="M0 400 L70 352 L140 388 L230 344 L300 392 L380 356 L450 396 L512 370 L512 512 L0 512 Z" fill="url(#near)"/>
+  <!-- ridge highlights -->
+  <path d="M170 240 L215 272 M350 236 L405 280" stroke="#fff3c4" stroke-width="3" opacity="0.5" fill="none"/>
+  <path d="M190 286 L255 330 M440 300 L512 330" stroke="#bfe0ff" stroke-width="3" opacity="0.35" fill="none"/>
+
+  <!-- sightline beam from viewer to the sun -->
+  <path d="M96 488 L256 252" stroke="#ffe27a" stroke-width="10" opacity="0.35" filter="url(#soft)"/>
+  <path d="M96 488 L256 252" stroke="#fff3b0" stroke-width="4" stroke-dasharray="18 12" stroke-linecap="round"/>
+  <circle cx="96" cy="488" r="10" fill="url(#gold)" stroke="#5a3a08" stroke-width="2"/>
+
+  <!-- the eye: golden lens framing the horizon -->
+  <path d="M40 250 Q256 70 472 250 Q256 430 40 250 Z" fill="none" stroke="#3a2404" stroke-width="22" opacity="0.6"/>
+  <path d="M40 250 Q256 70 472 250 Q256 430 40 250 Z" fill="none" stroke="url(#gold)" stroke-width="13"/>
+  <path d="M70 238 Q256 96 442 238" fill="none" stroke="#fff6cc" stroke-width="3" opacity="0.7"/>
+  <!-- iris ring around the sun -->
+  <circle cx="256" cy="250" r="66" fill="none" stroke="url(#gold)" stroke-width="7" opacity="0.95"/>
+  <circle cx="256" cy="250" r="66" fill="none" stroke="#3a2404" stroke-width="2" opacity="0.6"/>
+
+  <!-- painted-icon finish -->
+  <rect width="512" height="512" fill="url(#vignette)"/>
+  <rect x="6" y="6" width="500" height="500" fill="none" stroke="#fff" stroke-opacity="0.12" stroke-width="6"/>
+</svg>
