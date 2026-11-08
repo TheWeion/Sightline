@@ -1,8 +1,0 @@
-## Interface: 11507, 16001
-## Title: Occlusion View Distance
-## Notes: Scales your view-distance settings to how open your surroundings are. Your own settings stay the 100% baseline.
-## Author: TheWeion
-## Version: 1.0.0
-## SavedVariables: OcclusionViewDistanceDB
-
-Core.lua
