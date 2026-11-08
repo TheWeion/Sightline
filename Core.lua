@@ -428,10 +428,6 @@ frame:SetScript("OnEvent", function(_, event, arg1)
 
     elseif event == "PLAYER_LOGIN" then
         DiscoverCVars()
-        local loaded = (C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded)
-        if loaded and loaded("OcclusionViewDistance") then
-            ns.Print("|cffff4040The old OcclusionViewDistance addon is still enabled. Disable or delete it, or the two will fight over your settings.|r")
-        end
         if ns.OnLogin then ns.OnLogin() end
 
     elseif event == "PLAYER_LOGOUT" then
