@@ -102,7 +102,25 @@ local DEFAULTS = {
     lastApplied   = {},
     minimap       = { hide = false, angle = 215 },
     window        = {},
+    fps = {
+        enabled       = false,
+        target        = 60,    -- frames per second to aim for
+        tolerance     = 0.10,  -- within +/-10% of target counts as "close"
+        gain          = 0.05,  -- a test must improve FPS by 5% (and at least 2 fps) to count
+        sampleTime    = 4,     -- seconds of FPS averaged per measurement
+        settleTime    = 2.5,   -- seconds to wait after a change before measuring (terrain loading)
+        step          = 0.10,  -- size of each test adjustment
+        minFactor     = 0.50,  -- lowest FPS adjustment (50% of the scaled values)
+        allowAbove    = false, -- may raise values above the player's own settings
+        maxFactor     = 1.30,  -- highest FPS adjustment when allowAbove is on
+        pauseInCombat = true,
+        failCooldown  = 90,    -- seconds before retrying a direction that gave no gain
+    },
 }
+
+-- How strongly the FPS adjustment applies to each band. Far settings cost the
+-- most to draw and are least noticed; near settings are what you look at.
+ns.FPS_WEIGHT = { far = 1.00, mid = 0.80, near = 0.60 }
 ns.DEFAULTS = DEFAULTS
 
 ---------------------------------------------------------------------------
@@ -117,7 +135,17 @@ ns.state = {
     target  = { far = 1, mid = 1, near = 1 },
     current = { far = 1, mid = 1, near = 1 },
     applied = { far = 1, mid = 1, near = 1 },
+    envBands = { far = 1, mid = 1, near = 1 }, -- before the FPS adjustment
     pending = false,
+    lastWrite = 0,
+    fps = {
+        status = "Off", phase = "idle", key = nil,
+        factor = 1, trial = nil, trialDir = nil,
+        avg = nil, before = nil,
+        sum = 0, count = 0,
+        cooldownDown = 0, cooldownUp = 0,
+        history = {},
+    },
 }
 
 local db
@@ -328,6 +356,7 @@ local function ApplyBands(bands)
     end
 
     ns.state.pending = not allOk
+    ns.state.lastWrite = GetTime()
     if allOk then
         for _, b in ipairs(ns.BANDS) do ns.state.applied[b] = bands[b] end
         Debug(("far %.0f%%  mid %.0f%%  near %.0f%%  (%s)"):format(
@@ -347,6 +376,160 @@ local function NeedsWrite()
     return false
 end
 
+---------------------------------------------------------------------------
+-- Target FPS controller
+--
+-- Measures average FPS. When it's outside the target range it tests one step
+-- (lower distances if FPS is low, higher if FPS is high), waits for terrain to
+-- finish loading, and measures again:
+--   * lowering kept only if FPS improved noticeably, otherwise reverted
+--   * raising kept only if FPS stays at or near the target, otherwise reverted
+-- A direction that gave nothing isn't retried for a while. Results are
+-- remembered per environment and zone for the session.
+---------------------------------------------------------------------------
+
+local fpsMemory = {}
+
+local function FpsLog(msg)
+    local h = ns.state.fps.history
+    table.insert(h, 1, date("%H:%M:%S") .. "  " .. msg)
+    while #h > 8 do table.remove(h) end
+    Debug("FPS: " .. msg)
+end
+
+local function ResetSamples()
+    local fs = ns.state.fps
+    fs.sum, fs.count = 0, 0
+end
+
+function ns.MaxFpsFactor()
+    return db.fps.allowAbove and db.fps.maxFactor or 1.0
+end
+
+function ns.FpsFactor()
+    local fs = ns.state.fps
+    return fs.trial or fs.factor
+end
+
+local function StartTrial(dir, now)
+    local f, fs = db.fps, ns.state.fps
+    fs.before = fs.avg
+    fs.trialDir = dir
+    fs.trial = Clamp(fs.factor + (dir == "down" and -f.step or f.step), f.minFactor, ns.MaxFpsFactor())
+    fs.phase = "trial"
+    ResetSamples()
+    fs.status = dir == "down" and "Testing lower distances" or "Testing higher distances"
+end
+
+local function FinishTrial(avg, now)
+    local f, fs = db.fps, ns.state.fps
+    local before = fs.before or avg
+    if fs.trialDir == "down" then
+        local gain = avg - before
+        if gain >= math.max(2, before * f.gain) then
+            fs.factor = fs.trial
+            FpsLog(("Lower to %d%%: %.0f -> %.0f fps. Kept."):format(math.floor(fs.factor * 100 + 0.5), before, avg))
+        else
+            fs.cooldownDown = now + f.failCooldown
+            FpsLog(("Lower to %d%%: %.0f -> %.0f fps, no real gain. Reverted."):format(math.floor(fs.trial * 100 + 0.5), before, avg))
+        end
+    else
+        local low = f.target * (1 - f.tolerance / 2)
+        if avg >= low then
+            fs.factor = fs.trial
+            FpsLog(("Raise to %d%%: still %.0f fps. Kept."):format(math.floor(fs.factor * 100 + 0.5), avg))
+        else
+            fs.cooldownUp = now + f.failCooldown
+            FpsLog(("Raise to %d%%: fell to %.0f fps. Reverted."):format(math.floor(fs.trial * 100 + 0.5), avg))
+        end
+    end
+    fpsMemory[fs.key] = fs.factor
+    fs.trial, fs.trialDir = nil, nil
+    fs.phase = "measure"
+    ResetSamples()
+end
+
+local function Decide(avg, now)
+    local f, fs = db.fps, ns.state.fps
+    local tol = f.target * f.tolerance
+    if avg < f.target - tol then
+        if fs.factor <= f.minFactor + 0.001 then
+            fs.status = "Below target, at lowest allowed"
+        elseif now < fs.cooldownDown then
+            fs.status = "Below target, lowering didn't help"
+        else
+            StartTrial("down", now)
+        end
+    elseif avg > f.target + tol then
+        if fs.factor >= ns.MaxFpsFactor() - 0.001 then
+            fs.status = db.fps.allowAbove and "Above target, at highest allowed" or "Above target, at your full settings"
+        elseif now < fs.cooldownUp then
+            fs.status = "Above target, raising cost too much"
+        else
+            StartTrial("up", now)
+        end
+    else
+        fs.status = "On target"
+    end
+end
+
+local function FpsController(now, landed)
+    local f, fs = db.fps, ns.state.fps
+    if not f.enabled or not db.enabled then
+        fs.factor, fs.trial, fs.trialDir, fs.phase = 1, nil, nil, "idle"
+        fs.status = f.enabled and "Paused" or "Off"
+        fs.key = nil
+        ResetSamples()
+        return
+    end
+
+    -- New environment or zone: drop any test and use what worked here before.
+    local key = ns.state.envKey .. "|" .. ns.state.zone
+    if key ~= fs.key then
+        fs.key = key
+        fs.factor = fpsMemory[key] or 1
+        fs.trial, fs.trialDir = nil, nil
+        fs.cooldownDown, fs.cooldownUp = 0, 0
+        fs.phase = "measure"
+        ResetSamples()
+    end
+
+    if f.pauseInCombat and UnitAffectingCombat("player") then
+        fs.status = "Paused in combat"
+        ResetSamples()
+        return
+    end
+    if not landed or now - ns.state.lastWrite < f.settleTime then
+        if fs.phase ~= "trial" then fs.status = "Settling" end
+        ResetSamples()
+        return
+    end
+
+    fs.sum = fs.sum + GetFramerate()
+    fs.count = fs.count + 1
+    if fs.count * db.tickInterval < f.sampleTime then return end
+
+    local avg = fs.sum / fs.count
+    fs.avg = avg
+    ResetSamples()
+    if fs.phase == "trial" then
+        FinishTrial(avg, now)
+    else
+        Decide(avg, now)
+    end
+end
+
+-- Band scales after the FPS adjustment.
+local function ApplyFpsFactor(bands, factor)
+    local out = {}
+    local hi = math.max(1, ns.MaxFpsFactor())
+    for _, b in ipairs(ns.BANDS) do
+        local w = ns.FPS_WEIGHT[b]
+        out[b] = Clamp(bands[b] * (1 - w * (1 - factor)), 0.1, hi)
+    end
+    return out
+end
+
 local function Tick()
     local st = ns.state
     local subKey, zoneKey, zone, sub = ns.ZoneKeys()
@@ -354,7 +537,18 @@ local function Tick()
 
     local envKey, label, bands = ComputeEnvironment()
     st.envKey, st.envLabel = envKey, label
-    for _, b in ipairs(ns.BANDS) do st.target[b] = Clamp(bands[b] or 1, db.minScale, 1) end
+    for _, b in ipairs(ns.BANDS) do st.envBands[b] = Clamp(bands[b] or 1, db.minScale, 1) end
+
+    -- "Landed" = the values in use have reached their target, so FPS readings
+    -- reflect the current setting rather than a transition.
+    local landed = true
+    for _, b in ipairs(ns.BANDS) do
+        if st.current[b] ~= st.target[b] or st.applied[b] ~= st.target[b] then landed = false end
+    end
+    FpsController(GetTime(), landed)
+
+    local adjusted = ApplyFpsFactor(st.envBands, ns.FpsFactor())
+    for _, b in ipairs(ns.BANDS) do st.target[b] = adjusted[b] end
 
     if not db.enabled then return end
     CheckForUserChanges()
@@ -436,6 +630,11 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "CVAR_UPDATE" then
         if not writing then ns.Refresh() end
 
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Loading screens tank FPS for a moment; don't measure through them.
+        ns.state.lastWrite = GetTime()
+        ns.Refresh()
+
     elseif event == "PLAYER_REGEN_ENABLED" then
         if ns.state.pending then ApplyBands(ns.state.current) end
 
@@ -469,12 +668,22 @@ SlashCmdList["SIGHTLINE"] = function(input)
                 ns.Print("usage: /sight " .. cmd .. " <0-100> | clear")
             end
         end
+    elseif cmd == "fps" then
+        local n = tonumber(arg)
+        if arg == "off" then
+            db.fps.enabled = false; ns.Print("target FPS off")
+        elseif n and n >= 15 and n <= 360 then
+            db.fps.enabled = true; db.fps.target = n; ns.Print(("target FPS set to %d"):format(n))
+        else
+            ns.Print("usage: /sight fps <15-360> | off")
+        end
+        ns.Refresh()
     elseif cmd == "minimap" then
         db.minimap.hide = not db.minimap.hide
         if ns.UpdateMinimapButton then ns.UpdateMinimapButton() end
     elseif cmd == "debug" then
         db.debug = not db.debug; ns.Print("debug " .. (db.debug and "on" or "off"))
     else
-        ns.Print("/sight - open the window | on | off | here <0-100>|clear | zone <0-100>|clear | minimap | debug")
+        ns.Print("/sight - open the window | on | off | fps <15-360>|off | here <0-100>|clear | zone <0-100>|clear | minimap | debug")
     end
 end

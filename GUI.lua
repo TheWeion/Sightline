@@ -5,7 +5,7 @@
 local ADDON_NAME, ns = ...
 
 local TEMPLATE = BackdropTemplateMixin and "BackdropTemplate" or nil
-local W, H = 620, 520
+local W, H = 660, 540
 local atan2 = math.atan2 or math.atan
 
 local BACKDROP_MAIN = {
@@ -210,7 +210,7 @@ end
 
 local function AddTab(label, build)
     local index = #tabs + 1
-    local tabWidth = (W - 40) / 5
+    local tabWidth = (W - 40) / 6
 
     local b = CreateFrame("Button", nil, window)
     b:SetSize(tabWidth - 4, 24)
@@ -247,13 +247,16 @@ local function BuildOverview(tab, c)
 
     -- Location
     local loc = Panel(c)
-    loc:SetPoint("TOPLEFT"); loc:SetSize(cw, 74)
+    loc:SetPoint("TOPLEFT"); loc:SetSize(cw, 90)
     local zone = Text(loc, "GameFontNormalLarge")
     zone:SetPoint("TOPLEFT", 12, -10)
     local sub = Text(loc, "GameFontHighlight")
     sub:SetPoint("TOPLEFT", zone, "BOTTOMLEFT", 0, -4)
     local env = Text(loc, "GameFontHighlightSmall")
     env:SetPoint("TOPLEFT", sub, "BOTTOMLEFT", 0, -6)
+
+    local fpsLine = Text(loc, "GameFontHighlightSmall")
+    fpsLine:SetPoint("TOPLEFT", env, "BOTTOMLEFT", 0, -4)
 
     local status = Text(loc, "GameFontNormalLarge")
     status:SetPoint("TOPRIGHT", -14, -12)
@@ -313,6 +316,12 @@ local function BuildOverview(tab, c)
         zone:SetText(st.zone ~= "" and st.zone or "Unknown zone")
         sub:SetText(st.subzone ~= "" and st.subzone or " ")
         env:SetText("Environment: |cffffd100" .. st.envLabel .. "|r")
+        if db.fps.enabled then
+            fpsLine:SetText(("FPS %d / target %d   |   adjustment %s   |   %s"):format(
+                math.floor(GetFramerate() + 0.5), db.fps.target, Pct(ns.FpsFactor()), st.fps.status))
+        else
+            fpsLine:SetText(("FPS %d   |   target FPS off"):format(math.floor(GetFramerate() + 0.5)))
+        end
         if db.enabled then
             status:SetText("|cff40ff40ACTIVE|r"); pause:SetText("Pause")
         else
@@ -677,6 +686,126 @@ end
 -- Tab: Settings
 ---------------------------------------------------------------------------
 
+local function BuildPerformance(tab, c)
+    local cw = W - 36
+    local widgets = {}
+    local function f() return ns.db.fps end
+    local function changed() ns.Refresh() end
+
+    local cfg = Panel(c, "Target FPS")
+    cfg:SetPoint("TOPLEFT"); cfg:SetSize(cw, 214)
+
+    local en = Checkbox(cfg, "Use a target FPS",
+        "Sightline tests small changes to your view distances and keeps a change only if it moves you closer to the target.",
+        function() return f().enabled end, function(v) f().enabled = v; changed() end)
+    en:SetPoint("TOPLEFT", 10, -26)
+    local above = Checkbox(cfg, "Allow above my settings",
+        "When FPS is well above the target, view distances may go past your own values, up to the highest adjustment.",
+        function() return f().allowAbove end, function(v) f().allowAbove = v; changed() end)
+    above:SetPoint("TOPLEFT", 220, -26)
+    local combat = Checkbox(cfg, "Pause tests in combat",
+        "Spell effects make FPS jump around in combat, which would spoil the measurements.",
+        function() return f().pauseInCombat end, function(v) f().pauseInCombat = v; changed() end)
+    combat:SetPoint("TOPLEFT", 430, -26)
+    widgets[#widgets + 1] = en; widgets[#widgets + 1] = above; widgets[#widgets + 1] = combat
+
+    local sw = (cw - 60) / 2
+    local defs = {
+        { "Target FPS", 15, 240, 5, function(v) return ("%d fps"):format(v) end, "target",
+          "The frame rate to aim for." },
+        { "Close enough (+/-)", 0.05, 0.25, 0.01, Pct, "tolerance",
+          "No tests run while FPS is within this range of the target." },
+        { "Noticeable improvement", 0.02, 0.20, 0.01, Pct, "gain",
+          "Lowering distances is only kept if FPS rises by at least this much (and at least 2 fps). Otherwise it's reverted." },
+        { "Measure for", 2, 10, 1, function(v) return ("%ds"):format(v) end, "sampleTime",
+          "Seconds of FPS averaged for each measurement. Longer is more reliable but slower to react." },
+        { "Lowest adjustment", 0.3, 0.9, 0.05, Pct, "minFactor",
+          "The furthest the FPS target can lower the scaled values." },
+        { "Highest adjustment", 1.0, 1.5, 0.05, Pct, "maxFactor",
+          "With 'Allow above my settings' on, the furthest values can be raised. The game may cap some settings lower." },
+    }
+    for i, d in ipairs(defs) do
+        local key = d[6]
+        local s = Slider(cfg, d[1], d[2], d[3], d[4], sw, d[5],
+            function() return f()[key] end, function(v) f()[key] = v; changed() end, d[7])
+        local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
+        s:SetPoint("TOPLEFT", 14 + col * (sw + 30), -58 - row * 48)
+        widgets[#widgets + 1] = s
+    end
+
+    local live = Panel(c, "Live")
+    live:SetPoint("TOPLEFT", cfg, "BOTTOMLEFT", 0, -8)
+    live:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
+
+    local fpsNow = Text(live, "GameFontNormalHuge")
+    fpsNow:SetPoint("TOPLEFT", 14, -30)
+    local fpsLabel = Text(live, "GameFontDisableSmall", "current FPS")
+    fpsLabel:SetPoint("TOPLEFT", fpsNow, "BOTTOMLEFT", 0, -2)
+
+    local lines = {}
+    for i, label in ipairs({ "Last measurement", "Target range", "Status" }) do
+        local l = Text(live, "GameFontNormalSmall", label)
+        l:SetPoint("TOPLEFT", 120, -30 - (i - 1) * 18)
+        local v = Text(live, "GameFontHighlightSmall")
+        v:SetPoint("TOPLEFT", 240, -30 - (i - 1) * 18)
+        lines[i] = v
+    end
+
+    local adjLabel = Text(live, "GameFontNormalSmall", "Adjustment")
+    adjLabel:SetPoint("TOPLEFT", 14, -98)
+    local adjBar = Bar(live, 220, 14, { 0.85, 0.55, 1.0 })
+    adjBar:SetPoint("LEFT", adjLabel, "LEFT", 90, 0)
+    local adjHint = Text(live, "GameFontDisableSmall", "100% = the normal scaled values")
+    adjHint:SetPoint("TOPLEFT", adjLabel, "BOTTOMLEFT", 0, -8)
+
+    local warn = Text(live, "GameFontHighlightSmall")
+    warn:SetPoint("BOTTOMLEFT", 14, 10)
+    warn:SetWidth(cw / 2 - 20); warn:SetJustifyH("LEFT")
+
+    local histTitle = Text(live, "GameFontNormalSmall", "Recent tests")
+    histTitle:SetPoint("TOPLEFT", cw / 2 + 20, -30)
+    local hist = {}
+    for i = 1, 8 do
+        local h = Text(live, "GameFontHighlightSmall")
+        h:SetPoint("TOPLEFT", histTitle, "BOTTOMLEFT", 0, -4 - (i - 1) * 15)
+        h:SetWidth(cw / 2 - 30); h:SetJustifyH("LEFT"); h:SetWordWrap(false)
+        hist[i] = h
+    end
+
+    tab.Refresh = function() for _, w in ipairs(widgets) do w.Refresh() end end
+    tab.Update = function()
+        local cfgv, fs = f(), ns.state.fps
+        local fps = GetFramerate()
+        local tol = cfgv.target * cfgv.tolerance
+        local color = "|cffffffff"
+        if cfgv.enabled then
+            if fps < cfgv.target - tol then color = "|cffff6060"
+            elseif fps > cfgv.target + tol then color = "|cff60c0ff"
+            else color = "|cff60ff60" end
+        end
+        fpsNow:SetText(color .. math.floor(fps + 0.5) .. "|r")
+
+        lines[1]:SetText(fs.avg and ("%.1f fps"):format(fs.avg) or "-")
+        lines[2]:SetText(("%d - %d fps"):format(math.floor(cfgv.target - tol + 0.5), math.floor(cfgv.target + tol + 0.5)))
+        lines[3]:SetText("|cffffd100" .. fs.status .. "|r" .. (fs.trial and (" (" .. Pct(fs.trial) .. ")") or ""))
+
+        local factor = ns.FpsFactor()
+        local hi = math.max(1, ns.MaxFpsFactor())
+        adjBar:Set(factor / hi, 1 / hi, Pct(factor))
+
+        local cap = ns.ReadCVar("maxFPS")
+        if cfgv.enabled and cap and cap > 0 and cap < cfgv.target then
+            warn:SetText(("|cffff6060Your FPS cap (%d) is below the target. Raise it in the graphics settings or lower the target.|r"):format(cap))
+        elseif not cfgv.enabled then
+            warn:SetText("|cff888888Target FPS is off. View distances follow your surroundings only.|r")
+        else
+            warn:SetText("")
+        end
+
+        for i = 1, 8 do hist[i]:SetText(fs.history[i] or (i == 1 and "|cff888888No tests yet.|r" or "")) end
+    end
+end
+
 local function BuildSettings(tab, c)
     local cw = W - 36
     local widgets = {}
@@ -803,6 +932,7 @@ local function CreateWindow()
     AddTab("View Distances", BuildCVars)
     AddTab("Environments", BuildEnvironments)
     AddTab("Zones", BuildZones)
+    AddTab("Performance", BuildPerformance)
     AddTab("Settings", BuildSettings)
 
     local t = 0
@@ -881,6 +1011,9 @@ local function CreateMinimapButton()
         for _, band in ipairs(ns.BANDS) do
             local c = ns.BAND_INFO[band].color
             GameTooltip:AddDoubleLine(ns.BAND_INFO[band].label, Pct(ns.db.enabled and st.current[band] or 1), c[1], c[2], c[3], 1, 1, 1)
+        end
+        if ns.db.fps.enabled then
+            GameTooltip:AddLine(("FPS %d / %d  -  %s"):format(math.floor(GetFramerate() + 0.5), ns.db.fps.target, st.fps.status), 0.8, 0.8, 0.8)
         end
         GameTooltip:AddLine("Left-click: open   Right-click: pause/resume   Drag: move", 0.6, 0.6, 0.6, true)
         GameTooltip:Show()
