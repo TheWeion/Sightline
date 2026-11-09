@@ -123,6 +123,8 @@ local DEFAULTS = {
         minFps        = 60,    -- goal when no target FPS is set
         verifyBackground = true, -- double-check low readings with the background FPS cap off
         bkWait        = 3,     -- seconds to let FPS recover after turning the background cap off
+        bkSettle      = 3,     -- seconds to let FPS settle before checking it against the background cap
+        bkProbe       = 2,     -- seconds of FPS compared with the background cap
     },
     calibrations = {},         -- ["zone|subzone|env"] = { factor, fps, status, locked, ... }
 }
@@ -567,11 +569,15 @@ local function SaveCal(calStatus)
 end
 
 -- Background FPS cap (useMaxFPSBk) ----------------------------------------
--- Addons can't tell whether the game window is in the background. So before
--- acting on a low reading, Sightline turns the background cap off, waits for
--- FPS to recover, and measures again. If FPS is fine now, the low reading was
--- the cap. The cap is switched back on as soon as the check (and any
--- calibration it leads to) is finished, and on logout or reload.
+-- Addons can't tell whether the game window is in the background. When a
+-- reading is low and the background cap is on, Sightline checks it first:
+--   1. Wait for FPS to settle (cap still on), then watch it for a moment.
+--      Holding steady at maxFPSBk = the game is in the background: no change.
+--   2. Otherwise turn the cap off, wait, and measure again. Back to normal =
+--      the drop didn't last: no change. Still low = a real drop: recalibrate,
+--      with the cap off so an alt-tab can't spoil the tests.
+-- The cap is switched back on as soon as that's finished, and on logout or
+-- reload.
 
 local function BkCapOn() return ReadCVar("useMaxFPSBk") == 1 end
 
@@ -589,6 +595,7 @@ function ns.RestoreBkCap()
     end
     local fs = ns.state.fps
     fs.bkOverride, fs.verifying, fs.verifyUntil = nil, nil, nil
+    fs.check, fs.cmin, fs.cmax = nil, nil, nil
 end
 
 local function Settle(live, calStatus)
@@ -761,31 +768,54 @@ local function FpsController(now, landed)
         return
     end
 
+    local goal, low = ns.FpsGoal()
+    local fgCap, bgCap = ns.FpsCaps()
+
+    -- Step 1 of checking a drop: let FPS settle with the background cap still
+    -- on, then see whether it is holding steady at maxFPSBk. If it is, the
+    -- game is in the background.
+    if fs.check == "settle" then
+        if now < fs.checkUntil then
+            ResetSamples()
+            return
+        end
+        local fps = GetFramerate()
+        fs.sum, fs.count = fs.sum + fps, fs.count + 1
+        fs.cmin = math.min(fs.cmin or fps, fps)
+        fs.cmax = math.max(fs.cmax or fps, fps)
+        if fs.count * db.tickInterval < f.bkProbe then return end
+
+        local avg = fs.sum / fs.count
+        local steady = (fs.cmax - fs.cmin) <= math.max(2, (bgCap or 0) * 0.06)
+        local pinned = BkCapOn() and bgCap and steady and AtCap(avg, bgCap)
+        fs.check, fs.cmin, fs.cmax = nil, nil, nil
+        ResetSamples()
+        if pinned then
+            FpsLog(("FPS holding at the background cap (%d): game is in the background, no change"):format(bgCap))
+            fs.lowCount, fs.wasOk = 0, true
+            -- Check less and less often while it lasts.
+            fs.quietSpan = math.min(300, (fs.quietSpan or 15) * 2)
+            fs.quietUntil = now + fs.quietSpan
+            fs.status = "Paused: game in background"
+            return
+        end
+        -- Step 2: not the background cap. Measure again with the cap off, so
+        -- an alt-tab during the measurement (or the tests after it) can't
+        -- spoil it.
+        DisableBkCap(now)
+        fs.verifying = true
+        fs.verifyUntil = now + f.bkWait
+        fs.status = "Checking a drop"
+        return
+    end
+
     if fs.verifyUntil and now < fs.verifyUntil then
-        fs.status = "Double-checking (background cap off)"
+        fs.status = "Checking a drop"
         ResetSamples()
         return
     end
 
     local fps = GetFramerate()
-    local goal, low = ns.FpsGoal()
-    local fgCap, bgCap = ns.FpsCaps()
-
-    -- Pinned at the background cap (and that cap is below the goal): the game
-    -- is probably alt-tabbed. Throw the measurement away and wait until FPS
-    -- has been back above it for a while.
-    if bgCap and bgCap < low and (not fgCap or bgCap < fgCap - 1) and AtCap(fps, bgCap) then
-        fs.bgUntil = now + f.settleTime + 1
-        fs.lowCount = 0
-        fs.status = "Paused: game in background"
-        ResetSamples()
-        return
-    end
-    if fs.bgUntil and now < fs.bgUntil then
-        fs.status = "Paused: game in background"
-        ResetSamples()
-        return
-    end
 
     fs.sum = fs.sum + fps
     fs.count = fs.count + 1
@@ -817,12 +847,9 @@ local function FpsController(now, landed)
         fs.verifying = nil
         fs.avg = avg
         if avg >= low then
-            FpsLog(("low reading was the background FPS cap (now %.0f fps), no change"):format(avg))
+            FpsLog(("drop didn't last (back to %.0f fps), no change"):format(avg))
             ns.RestoreBkCap()
             fs.lowCount, fs.wasOk = 0, true
-            -- Probably alt-tabbed: check less and less often while it lasts.
-            fs.quietSpan = math.min(300, (fs.quietSpan or 15) * 2)
-            fs.quietUntil = now + fs.quietSpan
             fs.status = fs.calibrated and "On goal" or "Calibrating"
             return
         end
@@ -832,16 +859,15 @@ local function FpsController(now, landed)
 
     if avg >= low then fs.quietSpan, fs.quietUntil = nil, nil end
 
-    -- A low reading while the background cap is on: double-check first.
+    -- A low reading while the background cap is on: check it before acting.
     if avg < low and f.verifyBackground and BkCapOn() and not fs.bkOverride then
         if fs.quietUntil and now < fs.quietUntil then
             fs.status = "Paused: game in background"
             return
         end
-        DisableBkCap(now)
-        fs.verifying = true
-        fs.verifyUntil = now + f.bkWait
-        fs.status = "Double-checking (background cap off)"
+        fs.check = "settle"
+        fs.checkUntil = now + f.bkSettle
+        fs.status = "Checking a drop"
         return
     end
 
