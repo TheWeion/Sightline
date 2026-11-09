@@ -977,6 +977,7 @@ local function BuildPerformance(tab, c)
         { "Use a target FPS", "Aim for a specific frame rate instead of just a minimum. Distances can be raised as well as lowered.", "enabled", 260, -26 },
         { "Pause tests in combat", "Spell effects make FPS jump around in combat, which would spoil the measurements.", "pauseInCombat", 510, -26 },
         { "Allow above my settings", "With a target FPS, distances may go past your own values when there's spare FPS, up to the highest adjustment.", "allowAbove", 260, -50 },
+        { "Double-check drops", "Addons can't tell when the game is in the background. Before acting on a low reading, Sightline briefly turns off the background FPS cap (useMaxFPSBk), waits a few seconds and measures again. The cap is always turned back on afterwards.", "verifyBackground", 510, -50 },
     }
     for _, d in ipairs(checks) do
         local key = d[3]

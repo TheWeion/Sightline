@@ -121,6 +121,8 @@ local DEFAULTS = {
         failCooldown  = 90,    -- seconds before retrying a direction that gave no gain
         autoCalibrate = true,  -- calibrate every subzone even without a target FPS
         minFps        = 60,    -- goal when no target FPS is set
+        verifyBackground = true, -- double-check low readings with the background FPS cap off
+        bkWait        = 3,     -- seconds to let FPS recover after turning the background cap off
     },
     calibrations = {},         -- ["zone|subzone|env"] = { factor, fps, status, locked, ... }
 }
@@ -564,10 +566,36 @@ local function SaveCal(calStatus)
     c.pending = nil
 end
 
+-- Background FPS cap (useMaxFPSBk) ----------------------------------------
+-- Addons can't tell whether the game window is in the background. So before
+-- acting on a low reading, Sightline turns the background cap off, waits for
+-- FPS to recover, and measures again. If FPS is fine now, the low reading was
+-- the cap. The cap is switched back on as soon as the check (and any
+-- calibration it leads to) is finished, and on logout or reload.
+
+local function BkCapOn() return ReadCVar("useMaxFPSBk") == 1 end
+
+local function DisableBkCap(now)
+    local fs = ns.state.fps
+    WriteCVar("useMaxFPSBk", 0)
+    db.bkRestore = true
+    fs.bkOverride, fs.bkSince = true, now
+end
+
+function ns.RestoreBkCap()
+    if db and db.bkRestore then
+        WriteCVar("useMaxFPSBk", 1)
+        db.bkRestore = nil
+    end
+    local fs = ns.state.fps
+    fs.bkOverride, fs.verifying, fs.verifyUntil = nil, nil, nil
+end
+
 local function Settle(live, calStatus)
     local fs = ns.state.fps
     fs.status = live
     fs.lowCount = 0
+    ns.RestoreBkCap()
     if not fs.calibrated then FpsLog(("calibrated at %d%% (%.0f fps)"):format(Pc(fs.factor), fs.avg or 0)) end
     fs.calibrated = true
     SaveCal(calStatus)
@@ -632,10 +660,10 @@ local function FinishTrial(avg, now)
     if fs.calibrated then SaveCal(c and c.status or "Calibrated") end
 end
 
-local function Decide(avg, now)
+local function Decide(avg, now, verified)
     local f, fs = db.fps, ns.state.fps
     local goal, low, high, mode = ns.FpsGoal()
-    if avg < low and fs.calibrated and fs.wasOk and (fs.lowCount or 0) < 1 then
+    if not verified and avg < low and fs.calibrated and fs.wasOk and (fs.lowCount or 0) < 1 then
         -- One low reading in a calibrated place could be a blip (a loading
         -- hitch, a burst of spell effects). Only act on two in a row.
         fs.lowCount = (fs.lowCount or 0) + 1
@@ -670,6 +698,7 @@ end
 
 local function EnterSpot(key)
     local fs, st = ns.state.fps, ns.state
+    ns.RestoreBkCap()
     fs.key, fs.zone = key, st.zone
     fs.trial, fs.trialDir, fs.before, fs.avg = nil, nil, nil, nil
     fs.cooldownDown, fs.cooldownUp = 0, 0
@@ -707,6 +736,7 @@ end
 local function FpsController(now, landed)
     local f, fs, st = db.fps, ns.state.fps, ns.state
     if not ns.CalibrationActive() then
+        ns.RestoreBkCap()
         fs.factor, fs.trial, fs.trialDir, fs.phase, fs.key = 1, nil, nil, "idle", nil
         fs.status = db.enabled and "Off" or "Paused"
         ResetSamples()
@@ -715,6 +745,7 @@ local function FpsController(now, landed)
 
     local key = st.zone .. "|" .. st.subzone .. "|" .. st.envKey
     if key ~= fs.key then EnterSpot(key) end
+    if fs.bkOverride and now - (fs.bkSince or now) > 180 then ns.RestoreBkCap() end -- safety net
 
     local c = db.calibrations[key]
     if c and c.locked and fs.factor ~= c.factor then fs.factor = c.factor end
@@ -726,6 +757,12 @@ local function FpsController(now, landed)
     end
     if not landed or now - st.lastWrite < f.settleTime then
         if fs.phase ~= "trial" and not (c and c.locked) then fs.status = fs.calibrated and "Settling" or "Calibrating" end
+        ResetSamples()
+        return
+    end
+
+    if fs.verifyUntil and now < fs.verifyUntil then
+        fs.status = "Double-checking (background cap off)"
         ResetSamples()
         return
     end
@@ -772,10 +809,44 @@ local function FpsController(now, landed)
     end
     if fs.phase == "trial" then
         FinishTrial(avg, now)
-    else
-        fs.avg = avg
-        Decide(avg, now)
+        return
     end
+
+    -- Result of a check with the background cap off.
+    if fs.verifying then
+        fs.verifying = nil
+        fs.avg = avg
+        if avg >= low then
+            FpsLog(("low reading was the background FPS cap (now %.0f fps), no change"):format(avg))
+            ns.RestoreBkCap()
+            fs.lowCount, fs.wasOk = 0, true
+            -- Probably alt-tabbed: check less and less often while it lasts.
+            fs.quietSpan = math.min(300, (fs.quietSpan or 15) * 2)
+            fs.quietUntil = now + fs.quietSpan
+            fs.status = fs.calibrated and "On goal" or "Calibrating"
+            return
+        end
+        Decide(avg, now, true) -- genuinely low: recalibrate, cap stays off until done
+        return
+    end
+
+    if avg >= low then fs.quietSpan, fs.quietUntil = nil, nil end
+
+    -- A low reading while the background cap is on: double-check first.
+    if avg < low and f.verifyBackground and BkCapOn() and not fs.bkOverride then
+        if fs.quietUntil and now < fs.quietUntil then
+            fs.status = "Paused: game in background"
+            return
+        end
+        DisableBkCap(now)
+        fs.verifying = true
+        fs.verifyUntil = now + f.bkWait
+        fs.status = "Double-checking (background cap off)"
+        return
+    end
+
+    fs.avg = avg
+    Decide(avg, now)
 end
 
 -- Changes from the Calibrations tab ---------------------------------------
@@ -887,7 +958,7 @@ end
 
 function ns.SetEnabled(on)
     db.enabled = on and true or false
-    if not db.enabled then ns.RestoreBaselines() end
+    if not db.enabled then ns.RestoreBkCap(); ns.RestoreBaselines() end
     ns.Refresh()
 end
 
@@ -900,6 +971,7 @@ function ns.SetOverride(scope, openness)
 end
 
 function ns.ResetSettings()
+    ns.RestoreBkCap()
     ns.RestoreBaselines()
     local keep = { baselines = db.baselines, minimap = db.minimap, window = db.window, calibrations = db.calibrations,
                    engineMax = db.engineMax, engineMaxTime = db.engineMaxTime,
@@ -937,10 +1009,12 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         ns.db = db
 
     elseif event == "PLAYER_LOGIN" then
+        if db.bkRestore then ns.RestoreBkCap() end -- left off by a crash mid-check
         DiscoverCVars()
         if ns.OnLogin then ns.OnLogin() end
 
     elseif event == "PLAYER_LOGOUT" then
+        ns.RestoreBkCap()
         ns.RestoreBaselines()
 
     elseif event == "CVAR_UPDATE" then
