@@ -97,6 +97,10 @@ local DEFAULTS = {
     },
     cvarSettings  = {},  -- [name] = { enabled = bool, band = "far"|"mid"|"near" }
     customCVars   = {},  -- list of extra CVar names
+    engineMax     = {},  -- [cvar] = highest value the game's graphics menu uses
+    engineMaxTime = nil,
+    previousBaselines = nil, -- player's values before "engine maximum", for undo
+    setupDone     = false,
     zoneOverrides = {},  -- ["Zone|Subzone"] or ["Zone|*"] = openness 0..1
     baselines     = {},
     lastApplied   = {},
@@ -287,6 +291,106 @@ function ns.RebuildCVars()
     ns.RestoreBaselines()
     DiscoverCVars()
     ns.Refresh()
+end
+
+---------------------------------------------------------------------------
+-- Engine maximum
+--
+-- The addon API has no way to ask for a setting's maximum, so Sightline asks
+-- the game's own graphics menu: it briefly sets the menu's view distance,
+-- environment detail and ground clutter to their top level, reads the values
+-- the game picks for each distance setting, then puts the menu back. Where the
+-- player's own value is already higher (set via the console), theirs counts
+-- as the maximum.
+---------------------------------------------------------------------------
+
+local PRESETS = { "graphicsViewDistance", "graphicsEnvironmentDetail", "graphicsGroundClutter" }
+local PRESET_TOP = 10
+
+local function After(seconds, fn)
+    if C_Timer and C_Timer.After then C_Timer.After(seconds, fn) else fn() end
+end
+
+local function ForceRewrite()
+    for _, b in ipairs(ns.BANDS) do ns.state.applied[b] = -1 end
+    ns.Refresh()
+end
+
+function ns.DetectEngineMax(callback)
+    if ns.busy then return end
+    ns.busy = true
+    ns.RestoreBaselines()
+
+    local saved = {}
+    for _, p in ipairs(PRESETS) do
+        local v = ReadCVar(p)
+        if v then saved[p] = v; WriteCVar(p, PRESET_TOP) end
+    end
+
+    After(1.0, function()
+        local found = {}
+        for _, spec in ipairs(ns.active) do
+            local atTop = ReadCVar(spec.name) or 0
+            found[spec.name] = math.max(atTop, db.baselines[spec.name] or 0)
+        end
+        for p, v in pairs(saved) do WriteCVar(p, v) end
+
+        -- Restoring the menu can reset the distance settings to its own
+        -- values, so put the player's values back afterwards.
+        After(1.0, function()
+            for _, spec in ipairs(ns.active) do
+                local base = db.baselines[spec.name]
+                if base then WriteCVar(spec.name, base) end
+                db.lastApplied[spec.name] = nil
+            end
+            for name, v in pairs(found) do db.engineMax[name] = v end
+            db.engineMaxTime = time()
+            ns.busy = false
+            ForceRewrite()
+            if callback then callback(found) end
+        end)
+    end)
+end
+
+-- Make the given values the player's 100% (their "global" values).
+local function SetBaselines(values)
+    for _, spec in ipairs(ns.active) do
+        local v = values[spec.name]
+        if v then
+            WriteCVar(spec.name, v)
+            db.baselines[spec.name] = ReadCVar(spec.name) or v
+            db.lastApplied[spec.name] = nil
+        end
+    end
+    -- Calibrations were made against the old values.
+    if ns.RecalibrateAll then ns.RecalibrateAll() end
+    ForceRewrite()
+end
+
+function ns.ApplyEngineMax()
+    local any = false
+    for _, spec in ipairs(ns.active) do if db.engineMax[spec.name] then any = true end end
+    if not any then return false end
+    local prev = {}
+    for _, spec in ipairs(ns.active) do prev[spec.name] = db.baselines[spec.name] end
+    db.previousBaselines = prev
+    SetBaselines(db.engineMax)
+    return true
+end
+
+function ns.UndoEngineMax()
+    if not db.previousBaselines then return false end
+    SetBaselines(db.previousBaselines)
+    db.previousBaselines = nil
+    return true
+end
+
+-- Detect (if needed) and apply in one go, e.g. from the first-run dialog.
+function ns.UseEngineMax(callback)
+    ns.DetectEngineMax(function()
+        ns.ApplyEngineMax()
+        if callback then callback() end
+    end)
 end
 
 ---------------------------------------------------------------------------
@@ -740,6 +844,7 @@ local function ApplyFpsFactor(bands, factor)
 end
 
 local function Tick()
+    if ns.busy then return end
     local st = ns.state
     local subKey, zoneKey, zone, sub = ns.ZoneKeys()
     st.zone, st.subzone = zone, sub
@@ -796,7 +901,9 @@ end
 
 function ns.ResetSettings()
     ns.RestoreBaselines()
-    local keep = { baselines = db.baselines, minimap = db.minimap, window = db.window, calibrations = db.calibrations }
+    local keep = { baselines = db.baselines, minimap = db.minimap, window = db.window, calibrations = db.calibrations,
+                   engineMax = db.engineMax, engineMaxTime = db.engineMaxTime,
+                   previousBaselines = db.previousBaselines, setupDone = db.setupDone }
     wipe(db)
     CopyDefaults(DEFAULTS, db)
     for k, v in pairs(keep) do db[k] = v end

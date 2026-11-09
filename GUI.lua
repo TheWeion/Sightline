@@ -1095,70 +1095,229 @@ local function BuildSettings(tab, c)
     local widgets = {}
     local db = function() return ns.db end
 
+    -- General
     local gen = Panel(c, "General")
     gen:SetPoint("TOPLEFT"); gen:SetSize(CW, 84)
     local en = Checkbox(gen, "Enable Sightline", "When off, your own settings are restored and nothing is scaled.",
-        function() return db().enabled end, function(v) ns.SetEnabled(v) end, 220)
+        function() return db().enabled end, function(v) ns.SetEnabled(v) end, 200)
     en:SetPoint("TOPLEFT", 10, -26)
     local mm = Checkbox(gen, "Show minimap button", nil,
         function() return not db().minimap.hide end,
-        function(v) db().minimap.hide = not v; if ns.UpdateMinimapButton then ns.UpdateMinimapButton() end end, 220)
+        function(v) db().minimap.hide = not v; if ns.UpdateMinimapButton then ns.UpdateMinimapButton() end end, 200)
     mm:SetPoint("TOPLEFT", 10, -50)
     local dbg = Checkbox(gen, "Debug messages in chat", "Print a line each time the values change.",
-        function() return db().debug end, function(v) db().debug = v end, 220)
-    dbg:SetPoint("TOPLEFT", 380, -26)
+        function() return db().debug end, function(v) db().debug = v end, 200)
+    dbg:SetPoint("TOPLEFT", 260, -26)
     widgets[#widgets + 1] = en; widgets[#widgets + 1] = mm; widgets[#widgets + 1] = dbg
 
-    local beh = Panel(c, "Scaling behaviour")
-    beh:SetPoint("TOPLEFT", gen, "BOTTOMLEFT", 0, -8); beh:SetSize(CW, 176)
-    local sw = math.floor((CW - 60) / 2)
-    local defs = {
-        { "Lowest scale", 0.1, 1, 0.05, Pct, "minScale",
-          "Surroundings never scale a setting below this share of your own value." },
-        { "Check interval", 0.2, 2, 0.1, function(v) return ("%.1fs"):format(v) end, "tickInterval",
-          "How often your surroundings are checked." },
-        { "Shrink speed", 0.1, 1, 0.05, Pct, "rampDown",
-          "How fast distances drop when you walk into a building or city. Share of the gap closed per check." },
-        { "Grow speed", 0.1, 1, 0.05, Pct, "rampUp",
-          "How fast distances return when you step outside. Faster means less fog but more loading stutter." },
-        { "Minimum change before applying", 0.01, 0.15, 0.01, Pct, "writeThreshold",
-          "Small changes are skipped. Every change makes the game reload terrain, so higher means fewer hitches." },
-    }
-    for i, d in ipairs(defs) do
-        local key = d[6]
-        local s = Slider(beh, d[1], d[2], d[3], d[4], sw, d[5],
-            function() return db()[key] end, function(v) db()[key] = v; ns.Refresh() end, d[7])
-        local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
-        s:SetPoint("TOPLEFT", 14 + col * (sw + 30), -32 - row * 46)
-        widgets[#widgets + 1] = s
-    end
-
-    local act = Panel(c, "Actions")
-    act:SetPoint("TOPLEFT", beh, "BOTTOMLEFT", 0, -8)
-    act:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
-    local restore = Button(act, "Restore my values", 170, function()
+    local restore = Button(gen, "Restore my values", 170, function()
         ns.SetEnabled(false)
         ns.Print("paused - your settings are restored")
         tab.Refresh()
     end)
-    restore:SetPoint("TOPLEFT", 12, -32)
+    restore:SetPoint("TOPRIGHT", -12, -24)
     Tooltip(restore, "Restore my values", "Pause Sightline and put every setting back to your own value.")
-
     StaticPopupDialogs["SIGHTLINE_RESET"] = {
-        text = "Reset Sightline settings, bands and saved spots to defaults?\nYour own view-distance values and calibrations are kept.",
+        text = "Reset Sightline settings, bands and saved spots to defaults?\nYour view-distance values and calibrations are kept.",
         button1 = YES, button2 = NO, timeout = 0, whileDead = true, hideOnEscape = true,
         OnAccept = function() ns.ResetSettings(); tab.Refresh(); ns.Print("settings reset") end,
     }
-    local reset = Button(act, "Reset to defaults", 170, function() StaticPopup_Show("SIGHTLINE_RESET") end)
-    reset:SetPoint("LEFT", restore, "RIGHT", 10, 0)
+    local reset = Button(gen, "Reset to defaults", 170, function() StaticPopup_Show("SIGHTLINE_RESET") end)
+    reset:SetPoint("TOPRIGHT", restore, "BOTTOMRIGHT", 0, -4)
 
-    local about = Text(act, "GameFontDisableSmall",
-        ("Sightline %s   |   /sight opens this window   |   Your values are restored on logout and /reload."):format(ns.version),
-        CW - 30)
-    about:SetPoint("BOTTOMLEFT", 12, 10)
+    -- Scaling behaviour
+    local beh = Panel(c, "Scaling behaviour")
+    beh:SetPoint("TOPLEFT", gen, "BOTTOMLEFT", 0, -8); beh:SetSize(CW, 128)
+    local sw = math.floor((CW - 28 - 40) / 3)
+    local defs = {
+        { "Lowest scale", 0.1, 1, 0.05, Pct, "minScale",
+          "Surroundings never scale a setting below this share of your own value." },
+        { "Shrink speed", 0.1, 1, 0.05, Pct, "rampDown",
+          "How fast distances drop when you walk into a building or city. Share of the gap closed per check." },
+        { "Grow speed", 0.1, 1, 0.05, Pct, "rampUp",
+          "How fast distances return when you step outside. Faster means less fog but more loading stutter." },
+        { "Check interval", 0.2, 2, 0.1, function(v) return ("%.1fs"):format(v) end, "tickInterval",
+          "How often your surroundings are checked." },
+        { "Minimum change to apply", 0.01, 0.15, 0.01, Pct, "writeThreshold",
+          "Small changes are skipped. Every change makes the game reload terrain, so higher means fewer hitches." },
+    }
+    for i, d in ipairs(defs) do
+        local key = d[6]
+        local sl = Slider(beh, d[1], d[2], d[3], d[4], sw, d[5],
+            function() return db()[key] end, function(v) db()[key] = v; ns.Refresh() end, d[7])
+        local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
+        sl:SetPoint("TOPLEFT", 14 + col * (sw + 20), -32 - row * 46)
+        widgets[#widgets + 1] = sl
+    end
 
-    tab.Refresh = function() for _, w in ipairs(widgets) do w.Refresh() end end
+    -- Global values against the engine maximum
+    local glob = Panel(c, "Your global view distances")
+    glob:SetPoint("TOPLEFT", beh, "BOTTOMLEFT", 0, -8)
+    glob:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
+    local info = Text(glob, "GameFontHighlightSmall",
+        "These are your own values: the 100% that Sightline scales from in each place. Engine maximum is the highest the game's graphics menu goes (or your value, if you've set it higher).",
+        CW - 24, 2)
+    info:SetPoint("TOPLEFT", 12, -28)
+
+    local cols = { { "Setting", 12, 220 }, { "Your value", 240, 90 }, { "Engine max", 340, 90 }, { "Of maximum", 440, 200 } }
+    for _, col in ipairs(cols) do
+        Text(glob, "GameFontNormalSmall", col[1], col[3]):SetPoint("TOPLEFT", col[2], -62)
+    end
+    Divider(glob, -76)
+
+    local rows = {}
+    local MAX_ROWS = 7
+    for i = 1, MAX_ROWS do
+        local y = -82 - (i - 1) * 19
+        local r = {}
+        r.name = Text(glob, "GameFontHighlightSmall", nil, 220); r.name:SetPoint("TOPLEFT", 12, y)
+        r.base = Text(glob, "GameFontHighlightSmall", nil, 90); r.base:SetPoint("TOPLEFT", 240, y)
+        r.max = Text(glob, "GameFontHighlightSmall", nil, 90); r.max:SetPoint("TOPLEFT", 340, y)
+        r.bar = Bar(glob, 200, 13, { 1.0, 0.82, 0.0 })
+        r.bar:SetPoint("TOPLEFT", 440, y + 1)
+        rows[i] = r
+    end
+
+    local status = Text(glob, "GameFontDisableSmall", nil, CW - 24)
+    status:SetPoint("BOTTOMLEFT", 12, 38)
+
+    local bW = 200
+    local useMax = Button(glob, "Set all to engine maximum", bW, function()
+        if next(db().engineMax) == nil then
+            status:SetText("|cffffd100Detecting the engine maximum...|r")
+            ns.UseEngineMax(function() ns.Print("view distances set to the engine maximum"); tab.Refresh() end)
+        elseif ns.ApplyEngineMax() then
+            ns.Print("view distances set to the engine maximum"); tab.Refresh()
+        end
+    end)
+    useMax:SetPoint("BOTTOMLEFT", 12, 10)
+    Tooltip(useMax, "Set all to engine maximum",
+        "Make the engine maximum your 100%. Sightline still scales it down wherever you can't see far, and calibration keeps your FPS up. Every place is recalibrated.")
+    local detect = Button(glob, "Detect maximum again", bW, function()
+        status:SetText("|cffffd100Detecting the engine maximum...|r")
+        ns.DetectEngineMax(function() tab.Refresh() end)
+    end)
+    detect:SetPoint("LEFT", useMax, "RIGHT", 10, 0)
+    Tooltip(detect, "Detect maximum again", "Takes about two seconds. Your settings are put back afterwards.")
+    local undo = Button(glob, "Undo", 120, function()
+        if ns.UndoEngineMax() then ns.Print("previous view distances restored"); tab.Refresh() end
+    end)
+    undo:SetPoint("LEFT", detect, "RIGHT", 10, 0)
+    Tooltip(undo, "Undo", "Go back to the values you had before setting the engine maximum.")
+
+    local function UpdateGlobal()
+        local d = db()
+        local shown = 0
+        for _, spec in ipairs(ns.active) do
+            if shown >= MAX_ROWS then break end
+            shown = shown + 1
+            local r = rows[shown]
+            local base, max = d.baselines[spec.name], d.engineMax[spec.name]
+            r.name:SetText(spec.label)
+            r.base:SetText(FormatValue(base))
+            r.max:SetText(max and FormatValue(max) or "|cff888888?|r")
+            if base and max and max > 0 then
+                local share = base / max
+                r.bar:Set(math.min(1, share), math.min(1, share), Pct(share))
+            else
+                r.bar:Set(0, 0, "not detected")
+            end
+            r.name:Show(); r.base:Show(); r.max:Show(); r.bar:Show()
+        end
+        for i = shown + 1, MAX_ROWS do
+            local r = rows[i]
+            r.name:Hide(); r.base:Hide(); r.max:Hide(); r.bar:Hide()
+        end
+        if ns.busy then
+            status:SetText("|cffffd100Detecting the engine maximum...|r")
+        elseif d.engineMaxTime then
+            status:SetText("Engine maximum detected " .. Ago(d.engineMaxTime) .. "." ..
+                (d.previousBaselines and "   Undo returns to your earlier values." or ""))
+        else
+            status:SetText("Engine maximum not detected yet. 'Set all to engine maximum' detects it first.")
+        end
+        if undo.SetEnabled then undo:SetEnabled(d.previousBaselines ~= nil) end
+        if detect.SetEnabled then detect:SetEnabled(not ns.busy) end
+        if useMax.SetEnabled then useMax:SetEnabled(not ns.busy) end
+    end
+
+    tab.Refresh = function()
+        for _, w in ipairs(widgets) do w.Refresh() end
+        UpdateGlobal()
+    end
+    tab.Update = UpdateGlobal
 end
+
+---------------------------------------------------------------------------
+-- First-run choice
+---------------------------------------------------------------------------
+
+local firstRun
+
+local function ShowFirstRun()
+    if ns.db.setupDone then return end
+    if firstRun then firstRun:Show() return end
+
+    local f = CreateFrame("Frame", "SightlineFirstRun", UIParent, TEMPLATE)
+    firstRun = f
+    f:SetSize(520, 300)
+    f:SetPoint("CENTER", 0, 80)
+    f:SetFrameStrata("DIALOG")
+    f:SetBackdrop(BACKDROP_MAIN)
+    f:SetBackdropColor(0.04, 0.04, 0.06, 0.97)
+    f:EnableMouse(true)
+    f:SetMovable(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+
+    local header = f:CreateTexture(nil, "ARTWORK")
+    header:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header")
+    header:SetSize(300, 64)
+    header:SetPoint("TOP", 0, 12)
+    local title = Text(f, "GameFontNormal", "Welcome to Sightline", 220)
+    title:SetJustifyH("CENTER")
+    title:SetPoint("TOP", header, "TOP", 0, -14)
+
+    local icon = f:CreateTexture(nil, "ARTWORK")
+    icon:SetTexture(ns.ICON)
+    icon:SetSize(64, 64)
+    icon:SetPoint("TOPLEFT", 26, -40)
+    icon:SetTexCoord(0.04, 0.96, 0.04, 0.96)
+
+    local body = Text(f, "GameFontHighlight",
+        "Sightline shortens view distance where buildings and walls block it, and keeps it long in the open. It also calibrates each place to keep your frame rate up.\n\nWhich view distances should it start from?",
+        390, 7)
+    body:SetPoint("TOPLEFT", 104, -42)
+
+    local note = Text(f, "GameFontDisableSmall", "You can change this any time under Settings.", 470)
+    note:SetJustifyH("CENTER")
+    note:SetPoint("BOTTOM", 0, 64)
+
+    local function Done() ns.db.setupDone = true; f:Hide() end
+
+    local maxBtn
+    maxBtn = Button(f, "Use engine maximum", 210, function()
+        maxBtn:SetText("Detecting...")
+        if maxBtn.SetEnabled then maxBtn:SetEnabled(false) end
+        ns.UseEngineMax(function()
+            ns.Print("view distances set to the engine maximum. Sightline will scale them to what you can see.")
+            Done()
+        end)
+    end)
+    maxBtn:SetPoint("BOTTOMLEFT", 36, 26)
+    Tooltip(maxBtn, "Use engine maximum",
+        "Raise every view-distance setting to the highest the game allows. Sightline scales it down wherever you can't see far, and calibration keeps your FPS up.")
+    local keepBtn = Button(f, "Keep my current settings", 210, function()
+        ns.Print("using your current view distances. You can switch to the engine maximum under Settings.")
+        Done()
+    end)
+    keepBtn:SetPoint("BOTTOMRIGHT", -36, 26)
+    Tooltip(keepBtn, "Keep my current settings", "Use the view distances you have now as Sightline's 100%.")
+
+    f:Show()
+end
+ns.ShowFirstRun = ShowFirstRun
 
 ---------------------------------------------------------------------------
 -- Create window
@@ -1341,4 +1500,7 @@ ns.OnLogin = function()
     CreateMinimapButton()
     ns.UpdateMinimapButton()
     pcall(RegisterSettingsPanel)
+    if not ns.db.setupDone then
+        if C_Timer and C_Timer.After then C_Timer.After(4, ShowFirstRun) else ShowFirstRun() end
+    end
 end
