@@ -174,6 +174,43 @@ local function Slider(parent, label, minV, maxV, step, width, fmt, get, set, tip
     return f
 end
 
+-- Whole-number input box with a label and range hint.
+local function NumberBox(parent, label, minV, maxV, unit, width, get, set, tip)
+    local f = CreateFrame("Frame", nil, parent)
+    f:SetSize(width, 38)
+    f.label = Text(f, "GameFontNormalSmall", label, width - 4)
+    f.label:SetPoint("TOPLEFT", 2, 0)
+
+    local box = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+    box:SetSize(56, 20)
+    box:SetPoint("TOPLEFT", 8, -15)
+    box:SetAutoFocus(false)
+    box:SetNumeric(true)
+    box:SetMaxLetters(3)
+    box:SetJustifyH("CENTER")
+    f.box = box
+
+    local hint = Text(f, "GameFontDisableSmall", ("%s   (%d - %d)"):format(unit, minV, maxV), width - 80)
+    hint:SetPoint("LEFT", box, "RIGHT", 8, 0)
+
+    f.Refresh = function(force)
+        if force or not box:HasFocus() then box:SetText(tostring(get())) end
+    end
+    local function Commit()
+        local v = tonumber(box:GetText())
+        if v then
+            v = math.max(minV, math.min(maxV, math.floor(v)))
+            if v ~= get() then set(v) end
+        end
+        f.Refresh(true)
+    end
+    box:SetScript("OnEnterPressed", function(self) Commit(); self:ClearFocus() end)
+    box:SetScript("OnEditFocusLost", Commit)
+    box:SetScript("OnEscapePressed", function(self) f.Refresh(true); self:ClearFocus() end)
+    if tip then Tooltip(box, label, tip .. "\nType a number and press Enter.") end
+    return f
+end
+
 -- Horizontal bar with a marker for the target value.
 local function Bar(parent, width, height, color)
     local f = CreateFrame("Frame", nil, parent)
@@ -950,10 +987,10 @@ local function BuildPerformance(tab, c)
 
     local sw = math.floor((CW - 28 - 40) / 3)
     local defs = {
-        { "Minimum FPS (no target)", 30, 144, 1, function(v) return ("%d"):format(v) end, "minFps",
-          "Used when no target FPS is set: each place is calibrated to stay at or above this." },
-        { "Target FPS", 15, 240, 5, function(v) return ("%d"):format(v) end, "target",
-          "The frame rate to aim for when 'Use a target FPS' is on." },
+        { "Minimum FPS (no target)", 20, 360, "fps", nil, "minFps",
+          "Used when no target FPS is set: each place is calibrated to stay at or above this.", number = true },
+        { "Target FPS", 15, 360, "fps", nil, "target",
+          "The frame rate to aim for when 'Use a target FPS' is on.", number = true },
         { "Close enough (+/-)", 0.05, 0.25, 0.01, Pct, "tolerance",
           "No tests run while FPS is within this range of the target." },
         { "Noticeable improvement", 0.02, 0.20, 0.01, Pct, "gain",
@@ -967,8 +1004,14 @@ local function BuildPerformance(tab, c)
     }
     for i, d in ipairs(defs) do
         local key = d[6]
-        local s = Slider(cfg, d[1], d[2], d[3], d[4], sw, d[5],
-            function() return f()[key] end, function(v) f()[key] = v; changed() end, d[7])
+        local s
+        if d.number then
+            s = NumberBox(cfg, d[1], d[2], d[3], d[4], sw,
+                function() return f()[key] end, function(v) f()[key] = v; changed() end, d[7])
+        else
+            s = Slider(cfg, d[1], d[2], d[3], d[4], sw, d[5],
+                function() return f()[key] end, function(v) f()[key] = v; changed() end, d[7])
+        end
         local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
         s:SetPoint("TOPLEFT", 14 + col * (sw + 20), -84 - row * 48)
         widgets[#widgets + 1] = s
