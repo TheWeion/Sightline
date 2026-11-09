@@ -463,6 +463,7 @@ end
 local function Settle(live, calStatus)
     local fs = ns.state.fps
     fs.status = live
+    fs.lowCount = 0
     if not fs.calibrated then FpsLog(("calibrated at %d%% (%.0f fps)"):format(Pc(fs.factor), fs.avg or 0)) end
     fs.calibrated = true
     SaveCal(calStatus)
@@ -530,6 +531,15 @@ end
 local function Decide(avg, now)
     local f, fs = db.fps, ns.state.fps
     local goal, low, high, mode = ns.FpsGoal()
+    if avg < low and fs.calibrated and fs.wasOk and (fs.lowCount or 0) < 1 then
+        -- One low reading in a calibrated place could be a blip (a loading
+        -- hitch, a burst of spell effects). Only act on two in a row.
+        fs.lowCount = (fs.lowCount or 0) + 1
+        fs.status = "Checking a drop"
+        return
+    end
+    if avg >= low then fs.lowCount = 0 end
+    fs.wasOk = avg >= low
     if avg < low then
         local atLowest = fs.factor <= f.minFactor + EPS
         if atLowest or now < fs.cooldownDown then
@@ -559,6 +569,7 @@ local function EnterSpot(key)
     fs.key, fs.zone = key, st.zone
     fs.trial, fs.trialDir, fs.before, fs.avg = nil, nil, nil, nil
     fs.cooldownDown, fs.cooldownUp = 0, 0
+    fs.lowCount, fs.bgUntil, fs.wasOk = 0, nil, true
     fs.phase = "measure"
     ResetSamples()
     local c = db.calibrations[key]
@@ -572,6 +583,21 @@ local function EnterSpot(key)
         fs.calibrated = false
         fs.status = "Calibrating"
     end
+end
+
+-- The game's frame-rate caps. maxFPSBk applies while the game is in the
+-- background (alt-tabbed); readings pinned at it say nothing about the scene.
+function ns.FpsCaps()
+    local function cap(valueName, useName)
+        local v, use = ReadCVar(valueName), ReadCVar(useName)
+        if not v or v <= 0 or use == 0 then return nil end
+        return v
+    end
+    return cap("maxFPS", "useMaxFPS"), cap("maxFPSBk", "useMaxFPSBk")
+end
+
+local function AtCap(fps, cap)
+    return cap and math.abs(fps - cap) <= math.max(1.5, cap * 0.03)
 end
 
 local function FpsController(now, landed)
@@ -600,12 +626,41 @@ local function FpsController(now, landed)
         return
     end
 
-    fs.sum = fs.sum + GetFramerate()
+    local fps = GetFramerate()
+    local goal, low = ns.FpsGoal()
+    local fgCap, bgCap = ns.FpsCaps()
+
+    -- Pinned at the background cap (and that cap is below the goal): the game
+    -- is probably alt-tabbed. Throw the measurement away and wait until FPS
+    -- has been back above it for a while.
+    if bgCap and bgCap < low and (not fgCap or bgCap < fgCap - 1) and AtCap(fps, bgCap) then
+        fs.bgUntil = now + f.settleTime + 1
+        fs.lowCount = 0
+        fs.status = "Paused: game in background"
+        ResetSamples()
+        return
+    end
+    if fs.bgUntil and now < fs.bgUntil then
+        fs.status = "Paused: game in background"
+        ResetSamples()
+        return
+    end
+
+    fs.sum = fs.sum + fps
     fs.count = fs.count + 1
     if fs.count * db.tickInterval < f.sampleTime then return end
 
     local avg = fs.sum / fs.count
     ResetSamples()
+
+    -- Held at your own FPS cap below the goal: view distance can't help.
+    if fgCap and fgCap < low and AtCap(avg, fgCap) then
+        fs.avg = avg
+        fs.trial, fs.trialDir, fs.phase = nil, nil, "measure"
+        fs.status = "Limited by your FPS cap"
+        return
+    end
+
     if c and c.locked then
         fs.avg = avg
         fs.status = "Locked"

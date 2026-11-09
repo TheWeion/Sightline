@@ -1031,8 +1031,8 @@ local function BuildPerformance(tab, c)
         local hi = math.max(1, ns.MaxFpsFactor())
         adjBar:Set(factor / hi, 1 / hi, Pct(factor))
 
-        local cap = ns.ReadCVar("maxFPS")
-        if active and cap and cap > 0 and cap < goal then
+        local cap = ns.FpsCaps()
+        if active and cap and cap < low then
             warn:SetText(("|cffff6060Your FPS cap (%d) is below the goal. Raise it in the graphics settings or lower the goal.|r"):format(cap))
         else
             warn:SetText("")
