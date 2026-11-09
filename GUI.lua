@@ -1203,7 +1203,7 @@ local function CreateWindow()
     title:SetJustifyH("CENTER")
     title:SetPoint("TOP", header, "TOP", 0, -14)
 
-    local subtitle = Text(window, "GameFontDisableSmall", "Adaptive view distance", 200)
+    local subtitle = Text(window, "GameFontDisableSmall", "Adaptive view distance  -  v" .. ns.version, 240)
     subtitle:SetJustifyH("CENTER")
     subtitle:SetPoint("TOP", 0, -28)
 
