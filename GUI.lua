@@ -1267,6 +1267,7 @@ local function ShowFirstRun()
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    tinsert(UISpecialFrames, "SightlineFirstRun")
 
     local header = f:CreateTexture(nil, "ARTWORK")
     header:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header")
@@ -1296,7 +1297,6 @@ local function ShowFirstRun()
     local maxBtn
     maxBtn = Button(f, "Use engine maximum", 210, function()
         maxBtn:SetText("Detecting...")
-        if maxBtn.SetEnabled then maxBtn:SetEnabled(false) end
         ns.UseEngineMax(function()
             ns.Print("view distances set to the engine maximum. Sightline will scale them to what you can see.")
             Done()
