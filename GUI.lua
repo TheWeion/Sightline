@@ -5,13 +5,12 @@
   either wraps into a height that fits it or is short enough for one line.
 ]]
 
-local ADDON_NAME, ns = ...
+local _, ns = ...
 
 ns.ICON = "Interface\\AddOns\\Sightline\\Media\\Icon"
-local TEMPLATE = BackdropTemplateMixin and "BackdropTemplate" or nil
+local TEMPLATE = "BackdropTemplate"
 local W, H = 780, 600
 local CW = W - 36          -- content width
-local atan2 = math.atan2 or math.atan
 
 local BACKDROP_MAIN = {
     bgFile = "Interface\\Buttons\\WHITE8X8",
@@ -42,18 +41,18 @@ local function FormatValue(v)
     return ("%.2f"):format(v)
 end
 
-local function Hex(c)
-    return ("|cff%02x%02x%02x"):format(math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255))
+local function BandColorCode(band)
+    local c = ns.BAND_INFO[band].color
+    return ("|cff%02x%02x%02x"):format(c[1] * 255, c[2] * 255, c[3] * 255)
 end
-local function BandColorCode(band) return Hex(ns.BAND_INFO[band].color) end
 
 local function Ago(t)
     if not t then return "-" end
     local d = time() - t
     if d < 60 then return "just now" end
-    if d < 3600 then return ("%dm ago"):format(math.floor(d / 60)) end
-    if d < 86400 then return ("%dh ago"):format(math.floor(d / 3600)) end
-    return ("%dd ago"):format(math.floor(d / 86400))
+    if d < 3600 then return ("%dm ago"):format(d / 60) end
+    if d < 86400 then return ("%dh ago"):format(d / 3600) end
+    return ("%dd ago"):format(d / 86400)
 end
 
 -- Text with an explicit width. lines > 1 lets it wrap into that many lines.
@@ -875,9 +874,7 @@ local function BuildCalibrations(tab, c)
         editing = key
         local cc = key and ns.db.calibrations[key]
         local enabled = cc ~= nil
-        for _, w in ipairs({ slider.slider, lock, recal, del }) do
-            if w.SetEnabled then w:SetEnabled(enabled) elseif enabled then w:Enable() else w:Disable() end
-        end
+        for _, w in ipairs({ slider.slider, lock, recal, del }) do w:SetEnabled(enabled) end
         if not cc then
             edName:SetText("|cff888888Click a place in the list to change it.|r")
             edInfo:SetText("")
@@ -907,7 +904,6 @@ local function BuildCalibrations(tab, c)
     end
 
     tab.Refresh = function()
-        local goal, _, _, mode = ns.FpsGoal()
         if ns.CalibrationActive() then
             intro:SetText(("Sightline calibrates each place you visit to keep you %s. If FPS later drops, it recalibrates from the stored value and keeps a change only if it helps. Click a place to change it."):format(GoalText()))
         else
@@ -927,7 +923,7 @@ local function BuildCalibrations(tab, c)
         end)
 
         for _, r in ipairs(rows) do r:Hide() end
-        local currentKey = ns.CurrentCalKey()
+        local currentKey = ns.state.fps.key
         for i, k in ipairs(keys) do
             local cc = ns.db.calibrations[k]
             local r = GetRow(i)
@@ -1054,7 +1050,7 @@ local function BuildPerformance(tab, c)
 
     tab.Refresh = function() for _, w in ipairs(widgets) do w.Refresh() end end
     tab.Update = function()
-        local cfgv, fs = f(), ns.state.fps
+        local fs = ns.state.fps
         local fps = GetFramerate()
         local goal, low, high, mode = ns.FpsGoal()
         local active = ns.CalibrationActive()
@@ -1067,7 +1063,7 @@ local function BuildPerformance(tab, c)
         fpsNow:SetText(color .. math.floor(fps + 0.5) .. "|r")
 
         values[1]:SetText(active and GoalText() or "|cff888888calibration off|r")
-        values[2]:SetText(ns.PlaceName({ zone = ns.state.zone, subzone = ns.state.subzone }))
+        values[2]:SetText(ns.PlaceName(ns.state))
         values[3]:SetText(fs.avg and ("%.1f fps"):format(fs.avg) or "-")
         values[4]:SetText("|cffffd100" .. fs.status .. "|r")
 
@@ -1104,7 +1100,7 @@ local function BuildSettings(tab, c)
     en:SetPoint("TOPLEFT", 10, -26)
     local mm = Checkbox(gen, "Show minimap button", nil,
         function() return not db().minimap.hide end,
-        function(v) db().minimap.hide = not v; if ns.UpdateMinimapButton then ns.UpdateMinimapButton() end end, 200)
+        function(v) db().minimap.hide = not v; ns.UpdateMinimapButton() end, 200)
     mm:SetPoint("TOPLEFT", 10, -50)
     local dbg = Checkbox(gen, "Debug messages in chat", "Print a line each time the values change.",
         function() return db().debug end, function(v) db().debug = v end, 200)
@@ -1233,9 +1229,9 @@ local function BuildSettings(tab, c)
         else
             status:SetText("Engine maximum not detected yet.")
         end
-        if undo.SetEnabled then undo:SetEnabled(d.previousBaselines ~= nil) end
-        if detect.SetEnabled then detect:SetEnabled(not ns.busy) end
-        if useMax.SetEnabled then useMax:SetEnabled(not ns.busy) end
+        undo:SetEnabled(d.previousBaselines ~= nil)
+        detect:SetEnabled(not ns.busy)
+        useMax:SetEnabled(not ns.busy)
     end
 
     tab.Refresh = function()
@@ -1314,7 +1310,6 @@ local function ShowFirstRun()
 
     f:Show()
 end
-ns.ShowFirstRun = ShowFirstRun
 
 ---------------------------------------------------------------------------
 -- Create window
@@ -1437,7 +1432,7 @@ local function CreateMinimapButton()
             local mx, my = Minimap:GetCenter()
             local cx, cy = GetCursorPosition()
             local scale = Minimap:GetEffectiveScale()
-            ns.db.minimap.angle = math.deg(atan2(cy / scale - my, cx / scale - mx))
+            ns.db.minimap.angle = math.deg(math.atan2(cy / scale - my, cx / scale - mx))
             PlaceMinimapButton()
         end)
     end)
@@ -1479,18 +1474,12 @@ local function RegisterSettingsPanel()
     local d = Text(panel, "GameFontHighlight", "Adaptive view distance. All settings and live stats are in the Sightline window.", 560, 2)
     d:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, -8)
     local b = Button(panel, "Open Sightline", 160, function()
-        if SettingsPanel and SettingsPanel:IsShown() then HideUIPanel(SettingsPanel) end
-        if InterfaceOptionsFrame and InterfaceOptionsFrame:IsShown() then HideUIPanel(InterfaceOptionsFrame) end
+        HideUIPanel(SettingsPanel)
         if not window or not window:IsShown() then ns.ToggleWindow() end
     end)
     b:SetPoint("TOPLEFT", d, "BOTTOMLEFT", 0, -16)
 
-    if Settings and Settings.RegisterCanvasLayoutCategory then
-        local category = Settings.RegisterCanvasLayoutCategory(panel, "Sightline")
-        Settings.RegisterAddOnCategory(category)
-    elseif InterfaceOptions_AddCategory then
-        InterfaceOptions_AddCategory(panel)
-    end
+    Settings.RegisterAddOnCategory(Settings.RegisterCanvasLayoutCategory(panel, "Sightline"))
 end
 
 ns.OnLogin = function()
@@ -1498,6 +1487,6 @@ ns.OnLogin = function()
     ns.UpdateMinimapButton()
     pcall(RegisterSettingsPanel)
     if not ns.db.setupDone then
-        if C_Timer and C_Timer.After then C_Timer.After(4, ShowFirstRun) else ShowFirstRun() end
+        C_Timer.After(4, ShowFirstRun)
     end
 end

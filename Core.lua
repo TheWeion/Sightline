@@ -18,7 +18,6 @@
 ]]
 
 local ADDON_NAME, ns = ...
-ns.title = "Sightline"
 ns.version = "1.0.0"
 
 ---------------------------------------------------------------------------
@@ -98,12 +97,9 @@ local DEFAULTS = {
     cvarSettings  = {},  -- [name] = { enabled = bool, band = "far"|"mid"|"near" }
     customCVars   = {},  -- list of extra CVar names
     engineMax     = {},  -- [cvar] = highest value the game's graphics menu uses
-    engineMaxTime = nil,
-    previousBaselines = nil, -- player's values before "engine maximum", for undo
     setupDone     = false,
     zoneOverrides = {},  -- ["Zone|Subzone"] or ["Zone|*"] = openness 0..1
     baselines     = {},
-    lastApplied   = {},
     minimap       = { hide = false, angle = 215 },
     window        = {},
     fps = {
@@ -112,26 +108,20 @@ local DEFAULTS = {
         tolerance     = 0.10,  -- within +/-10% of target counts as "close"
         gain          = 0.05,  -- a test must improve FPS by 5% (and at least 2 fps) to count
         sampleTime    = 4,     -- seconds of FPS averaged per measurement
-        settleTime    = 2.5,   -- seconds to wait after a change before measuring (terrain loading)
-        step          = 0.10,  -- size of each test adjustment
         minFactor     = 0.50,  -- lowest FPS adjustment (50% of the scaled values)
         allowAbove    = false, -- may raise values above the player's own settings
         maxFactor     = 1.30,  -- highest FPS adjustment when allowAbove is on
         pauseInCombat = true,
-        failCooldown  = 90,    -- seconds before retrying a direction that gave no gain
         autoCalibrate = true,  -- calibrate every subzone even without a target FPS
         minFps        = 60,    -- goal when no target FPS is set
         verifyBackground = true, -- double-check low readings with the background FPS cap off
-        bkWait        = 3,     -- seconds to let FPS recover after turning the background cap off
-        bkSettle      = 3,     -- seconds to let FPS settle before checking it against the background cap
-        bkProbe       = 2,     -- seconds of FPS compared with the background cap
     },
     calibrations = {},         -- ["zone|subzone|env"] = { factor, fps, status, locked, ... }
 }
 
 -- How strongly the FPS adjustment applies to each band. Far settings cost the
 -- most to draw and are least noticed; near settings are what you look at.
-ns.FPS_WEIGHT = { far = 1.00, mid = 0.80, near = 0.60 }
+local FPS_WEIGHT = { far = 1.00, mid = 0.80, near = 0.60 }
 ns.DEFAULTS = DEFAULTS
 
 ---------------------------------------------------------------------------
@@ -141,13 +131,12 @@ ns.DEFAULTS = DEFAULTS
 ns.specs  = {}   -- all known CVars (defaults + custom), with player settings applied
 ns.active = {}   -- specs that are enabled and exist in this client
 ns.state = {
-    envKey = "open", envLabel = "Open world", reason = "",
+    envKey = "open", envLabel = "Open world",
     zone = "", subzone = "",
     target  = { far = 1, mid = 1, near = 1 },
     current = { far = 1, mid = 1, near = 1 },
     applied = { far = 1, mid = 1, near = 1 },
     envBands = { far = 1, mid = 1, near = 1 }, -- before the FPS adjustment
-    pending = false,
     lastWrite = 0,
     fps = {
         status = "Off", factor = 1, calibrated = false,
@@ -158,7 +147,7 @@ ns.state = {
 }
 
 local db
-local writing = false
+local lastApplied = {}
 local elapsed = 0
 
 ---------------------------------------------------------------------------
@@ -174,22 +163,12 @@ local function Debug(msg)
 end
 
 function ns.ReadCVar(name)
-    local v
-    if C_CVar and C_CVar.GetCVar then v = C_CVar.GetCVar(name) else v = GetCVar(name) end
-    return tonumber(v)
+    return tonumber(C_CVar.GetCVar(name))
 end
 local ReadCVar = ns.ReadCVar
 
 local function WriteCVar(name, value)
-    writing = true
-    local ok
-    if C_CVar and C_CVar.SetCVar then
-        ok = pcall(C_CVar.SetCVar, name, tostring(value))
-    else
-        ok = pcall(SetCVar, name, tostring(value))
-    end
-    writing = false
-    return ok
+    return pcall(C_CVar.SetCVar, name, tostring(value))
 end
 
 local function Clamp(x, lo, hi)
@@ -250,26 +229,20 @@ local function DiscoverCVars()
     for _, spec in ipairs(ns.specs) do
         if spec.enabled and spec.exists then
             table.insert(ns.active, spec)
-            local current = ReadCVar(spec.name)
-            local base, last = db.baselines[spec.name], db.lastApplied[spec.name]
-            -- Still holding a value we wrote (e.g. after a crash)? Keep the saved
-            -- baseline. Otherwise the current value is the player's own.
-            if not (base and last and NearlyEqual(current, last)) then
-                db.baselines[spec.name] = current
-            end
-            db.lastApplied[spec.name] = nil
+            db.baselines[spec.name] = ReadCVar(spec.name)
         end
     end
+    wipe(lastApplied)
     for _, b in ipairs(ns.BANDS) do ns.state.applied[b] = 1 end
 end
 
 local function CheckForUserChanges()
     for _, spec in ipairs(ns.active) do
         local current = ReadCVar(spec.name)
-        local expected = db.lastApplied[spec.name] or db.baselines[spec.name]
+        local expected = lastApplied[spec.name] or db.baselines[spec.name]
         if current and expected and not NearlyEqual(current, expected) then
             db.baselines[spec.name] = current
-            db.lastApplied[spec.name] = nil
+            lastApplied[spec.name] = nil
             for _, b in ipairs(ns.BANDS) do ns.state.applied[b] = -1 end -- force rewrite
             Debug(("%s: you changed it to %s, now your 100%%"):format(spec.name, current))
         end
@@ -280,7 +253,7 @@ function ns.RestoreBaselines()
     for _, spec in ipairs(ns.active) do
         local base = db.baselines[spec.name]
         if base then WriteCVar(spec.name, base) end
-        db.lastApplied[spec.name] = nil
+        lastApplied[spec.name] = nil
     end
     for _, b in ipairs(ns.BANDS) do
         ns.state.applied[b] = 1
@@ -400,7 +373,7 @@ end
 ---------------------------------------------------------------------------
 
 -- Value a CVar gets for the given band scales.
-function ns.ValueFor(spec, bands)
+local function ValueFor(spec, bands)
     local base = db.baselines[spec.name]
     if not base then return nil end
     local s = bands[spec.band] or 1
@@ -411,7 +384,7 @@ end
 
 local function ApplyBands(bands)
     local values = {}
-    for _, spec in ipairs(ns.active) do values[spec.name] = ns.ValueFor(spec, bands) end
+    for _, spec in ipairs(ns.active) do values[spec.name] = ValueFor(spec, bands) end
     -- Keep the horizon inside the draw distance.
     if values.horizonStart and values.farclip and values.horizonStart > values.farclip then
         values.horizonStart = values.farclip
@@ -422,14 +395,13 @@ local function ApplyBands(bands)
         local v = values[spec.name]
         if v then
             if WriteCVar(spec.name, v) then
-                db.lastApplied[spec.name] = ReadCVar(spec.name) or v
+                lastApplied[spec.name] = ReadCVar(spec.name) or v
             else
                 allOk = false
             end
         end
     end
 
-    ns.state.pending = not allOk
     ns.state.lastWrite = GetTime()
     if allOk then
         for _, b in ipairs(ns.BANDS) do ns.state.applied[b] = bands[b] end
@@ -440,7 +412,6 @@ end
 
 local function NeedsWrite()
     local st = ns.state
-    if st.pending then return true end
     for _, b in ipairs(ns.BANDS) do
         local diff = math.abs(st.current[b] - st.applied[b])
         if diff >= db.writeThreshold then return true end
@@ -712,8 +683,6 @@ local function FpsController(now, landed)
     end
 end
 
-function ns.CurrentCalKey() return ns.state.fps.key end
-
 function ns.SetCalibration(key, factor, locked)
     local c = db.calibrations[key]
     if factor then
@@ -758,10 +727,8 @@ end
 -- Band scales after the FPS adjustment.
 local function ApplyFpsFactor(bands, factor)
     local out = {}
-    local hi = math.max(1, ns.MaxFpsFactor())
     for _, b in ipairs(ns.BANDS) do
-        local w = ns.FPS_WEIGHT[b]
-        out[b] = Clamp(bands[b] * (1 - w * (1 - factor)), 0.1, hi)
+        out[b] = Clamp(bands[b] * (1 - FPS_WEIGHT[b] * (1 - factor)), 0.1, ns.MaxFpsFactor())
     end
     return out
 end
@@ -797,10 +764,7 @@ local function Tick()
         if math.abs(st.target[b] - st.current[b]) < 0.02 then st.current[b] = st.target[b] end
     end
 
-    if NeedsWrite() then
-        if st.pending and InCombatLockdown() then return end
-        ApplyBands(st.current)
-    end
+    if NeedsWrite() then ApplyBands(st.current) end
 end
 
 -- Run a check now instead of waiting for the next tick.
@@ -849,8 +813,7 @@ frame:SetScript("OnUpdate", function(_, dt)
 end)
 
 for _, e in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_LOGOUT", "PLAYER_ENTERING_WORLD",
-                     "ZONE_CHANGED", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED_NEW_AREA",
-                     "PLAYER_REGEN_ENABLED", "CVAR_UPDATE" }) do
+                     "ZONE_CHANGED", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED_NEW_AREA" }) do
     frame:RegisterEvent(e)
 end
 
@@ -861,24 +824,17 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         ns.db = db
 
     elseif event == "PLAYER_LOGIN" then
-        if db.bkRestore then ns.RestoreBkCap() end -- left off by a crash mid-check
         DiscoverCVars()
-        if ns.OnLogin then ns.OnLogin() end
+        ns.OnLogin()
 
     elseif event == "PLAYER_LOGOUT" then
         ns.RestoreBkCap()
         ns.RestoreBaselines()
 
-    elseif event == "CVAR_UPDATE" then
-        if not writing then ns.Refresh() end
-
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- Loading screens tank FPS for a moment; don't measure through them.
         ns.state.lastWrite = GetTime()
         ns.Refresh()
-
-    elseif event == "PLAYER_REGEN_ENABLED" then
-        if ns.state.pending then ApplyBands(ns.state.current) end
 
     else
         ns.Refresh()
@@ -894,7 +850,7 @@ SLASH_SIGHTLINE2 = "/sight"
 SlashCmdList["SIGHTLINE"] = function(input)
     local cmd, arg = (input or ""):lower():match("^%s*(%S*)%s*(.-)%s*$")
     if cmd == "" then
-        if ns.ToggleWindow then ns.ToggleWindow() end
+        ns.ToggleWindow()
     elseif cmd == "on" then
         ns.SetEnabled(true); ns.Print("enabled")
     elseif cmd == "off" then
@@ -922,7 +878,7 @@ SlashCmdList["SIGHTLINE"] = function(input)
         ns.Refresh()
     elseif cmd == "minimap" then
         db.minimap.hide = not db.minimap.hide
-        if ns.UpdateMinimapButton then ns.UpdateMinimapButton() end
+        ns.UpdateMinimapButton()
     elseif cmd == "debug" then
         db.debug = not db.debug; ns.Print("debug " .. (db.debug and "on" or "off"))
     else
