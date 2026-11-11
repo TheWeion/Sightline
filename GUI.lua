@@ -1,16 +1,11 @@
---[[
-  Sightline - window, minimap button and game-settings entry.
-
-  Layout rule: every piece of text that can change gets an explicit width, and
-  either wraps into a height that fits it or is short enough for one line.
-]]
+-- Every label gets an explicit width: text without one is truncated or overlaps its neighbour.
 
 local _, ns = ...
 
 ns.ICON = "Interface\\AddOns\\Sightline\\Media\\Icon"
 local TEMPLATE = "BackdropTemplate"
 local W, H = 780, 600
-local CW = W - 36          -- content width
+local CW = W - 36 -- content width
 
 local BACKDROP_MAIN = {
     bgFile = "Interface\\Buttons\\WHITE8X8",
@@ -28,10 +23,6 @@ local SLIDER_BACKDROP = {
     tile = true, tileSize = 8, edgeSize = 8,
     insets = { left = 3, right = 3, top = 6, bottom = 6 },
 }
-
----------------------------------------------------------------------------
--- Helpers
----------------------------------------------------------------------------
 
 local function Pct(x) return ("%d%%"):format(math.floor((x or 0) * 100 + 0.5)) end
 
@@ -55,7 +46,6 @@ local function Ago(t)
     return ("%dd ago"):format(d / 86400)
 end
 
--- Text with an explicit width. lines > 1 lets it wrap into that many lines.
 local function Text(parent, font, text, width, lines)
     local fs = parent:CreateFontString(nil, "OVERLAY", font or "GameFontHighlight")
     fs:SetJustifyH("LEFT")
@@ -122,7 +112,7 @@ local function Checkbox(parent, label, tip, get, set, labelWidth)
     return cb
 end
 
--- Slider built from base textures so it works on every client version.
+-- no template: the stock slider templates differ between clients
 local function Slider(parent, label, minV, maxV, step, width, fmt, get, set, tip)
     local f = CreateFrame("Frame", nil, parent)
     f:SetSize(width, label and 38 or 22)
@@ -173,7 +163,6 @@ local function Slider(parent, label, minV, maxV, step, width, fmt, get, set, tip
     return f
 end
 
--- Whole-number input box with a label and range hint.
 local function NumberBox(parent, label, minV, maxV, unit, width, get, set, tip)
     local f = CreateFrame("Frame", nil, parent)
     f:SetSize(width, 38)
@@ -210,7 +199,6 @@ local function NumberBox(parent, label, minV, maxV, unit, width, get, set, tip)
     return f
 end
 
--- Horizontal bar with a marker for the target value.
 local function Bar(parent, width, height, color)
     local f = CreateFrame("Frame", nil, parent)
     f:SetSize(width, height)
@@ -295,10 +283,6 @@ local function GoalText()
     return ("at least %d fps"):format(goal)
 end
 
----------------------------------------------------------------------------
--- Window and tabs
----------------------------------------------------------------------------
-
 local window
 local tabs = {}
 local TAB_NAMES = { "Overview", "Distances", "Environments", "Zones", "Calibrations", "Performance", "Settings" }
@@ -350,10 +334,6 @@ local function AddTab(label, build)
 end
 
 local CH = H - 82 - 18 -- content height
-
----------------------------------------------------------------------------
--- Tab: Overview
----------------------------------------------------------------------------
 
 local function BuildOverview(tab, c)
     local loc = Panel(c)
@@ -462,10 +442,6 @@ local function BuildOverview(tab, c)
         more:SetText(#ns.active > MAX_ROWS and ("+%d more on the Distances tab"):format(#ns.active - MAX_ROWS) or "")
     end
 end
-
----------------------------------------------------------------------------
--- Tab: Distances (per-CVar control)
----------------------------------------------------------------------------
 
 local function NextBand(band)
     for i, b in ipairs(ns.BANDS) do
@@ -628,10 +604,6 @@ local function BuildCVars(tab, c)
     end
 end
 
----------------------------------------------------------------------------
--- Tab: Environments (per-band profiles)
----------------------------------------------------------------------------
-
 local function BuildEnvironments(tab, c)
     local intro = Text(c, "GameFontHighlightSmall",
         "How much of your view distance each band keeps in each environment. Far should drop the most when walls are close; Near should stay high.",
@@ -684,10 +656,6 @@ local function BuildEnvironments(tab, c)
         end
     end
 end
-
----------------------------------------------------------------------------
--- Tab: Zones (openness for spots)
----------------------------------------------------------------------------
 
 local function PrettyKey(key)
     local zone, sub = key:match("^(.-)|(.*)$")
@@ -791,10 +759,6 @@ local function BuildZones(tab, c)
     end
 end
 
----------------------------------------------------------------------------
--- Tab: Calibrations (per-subzone FPS calibrations)
----------------------------------------------------------------------------
-
 local function EnvLabelFor(c)
     if c.envLabel then return c.envLabel end
     for _, e in ipairs(ns.ENVIRONMENTS) do if e.key == c.env then return e.label end end
@@ -824,7 +788,6 @@ local function BuildCalibrations(tab, c)
     empty:SetPoint("TOPLEFT", 12, -32)
     local rows = {}
 
-    -- Editor
     local ed = Panel(c, "Selected calibration")
     ed:SetPoint("TOPLEFT", list, "BOTTOMLEFT", 0, -8)
     ed:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
@@ -948,17 +911,13 @@ local function BuildCalibrations(tab, c)
         ShowEditor(selected)
     end
 
-    -- Live: refresh the list every couple of seconds while open.
+    -- Update runs every 0.25 s: rebuild the list every 2 s
     local t = 0
     tab.Update = function()
         t = t + 1
         if t >= 8 then t = 0; tab.Refresh() end
     end
 end
-
----------------------------------------------------------------------------
--- Tab: Performance (goals and live FPS)
----------------------------------------------------------------------------
 
 local function BuildPerformance(tab, c)
     local widgets = {}
@@ -1084,15 +1043,10 @@ local function BuildPerformance(tab, c)
     end
 end
 
----------------------------------------------------------------------------
--- Tab: Settings
----------------------------------------------------------------------------
-
 local function BuildSettings(tab, c)
     local widgets = {}
     local db = function() return ns.db end
 
-    -- General
     local gen = Panel(c, "General")
     gen:SetPoint("TOPLEFT"); gen:SetSize(CW, 84)
     local en = Checkbox(gen, "Enable Sightline", "When off, your own settings are restored and nothing is scaled.",
@@ -1122,7 +1076,6 @@ local function BuildSettings(tab, c)
     local reset = Button(gen, "Reset to defaults", 170, function() StaticPopup_Show("SIGHTLINE_RESET") end)
     reset:SetPoint("TOPRIGHT", restore, "BOTTOMRIGHT", 0, -4)
 
-    -- Scaling behaviour
     local beh = Panel(c, "Scaling behaviour")
     beh:SetPoint("TOPLEFT", gen, "BOTTOMLEFT", 0, -8); beh:SetSize(CW, 128)
     local sw = math.floor((CW - 28 - 40) / 3)
@@ -1147,7 +1100,6 @@ local function BuildSettings(tab, c)
         widgets[#widgets + 1] = sl
     end
 
-    -- Global values against the engine maximum
     local glob = Panel(c, "Your global view distances")
     glob:SetPoint("TOPLEFT", beh, "BOTTOMLEFT", 0, -8)
     glob:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
@@ -1241,10 +1193,6 @@ local function BuildSettings(tab, c)
     tab.Update = UpdateGlobal
 end
 
----------------------------------------------------------------------------
--- First-run choice
----------------------------------------------------------------------------
-
 local firstRun
 
 local function ShowFirstRun()
@@ -1310,10 +1258,6 @@ local function ShowFirstRun()
 
     f:Show()
 end
-
----------------------------------------------------------------------------
--- Create window
----------------------------------------------------------------------------
 
 local BUILDERS = { BuildOverview, BuildCVars, BuildEnvironments, BuildZones, BuildCalibrations, BuildPerformance, BuildSettings }
 
@@ -1387,10 +1331,6 @@ function ns.ToggleWindow()
     window:SetShown(not window:IsShown())
 end
 
----------------------------------------------------------------------------
--- Minimap button
----------------------------------------------------------------------------
-
 local mini
 
 local function PlaceMinimapButton()
@@ -1461,10 +1401,6 @@ function ns.UpdateMinimapButton()
     if not mini then return end
     mini:SetShown(not ns.db.minimap.hide)
 end
-
----------------------------------------------------------------------------
--- Entry in the game's AddOns settings
----------------------------------------------------------------------------
 
 local function RegisterSettingsPanel()
     local panel = CreateFrame("Frame")

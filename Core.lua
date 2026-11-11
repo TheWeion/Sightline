@@ -1,28 +1,7 @@
---[[
-  Sightline - adaptive view distance
-  ----------------------------------
-  The addon API cannot ray-trace the world, so how much the player can see is
-  estimated from what the client exposes (indoors, cities, instances, flying,
-  underwater, resting) plus per-zone values the player teaches it.
-
-  Each view-distance setting belongs to a visibility BAND:
-    far  - terrain and horizon. Walls and buildings block these first.
-    mid  - building and object detail. Partly visible between buildings.
-    near - ground clutter and characters. Still visible right next to you.
-  Every environment gives each band its own scale, so in a city the horizon is
-  cut hard while ground clutter and nearby characters barely change.
-
-  The player's own values (graphics menu or /console) are always the 100%
-  baseline. Sightline only scales down from them and restores them on
-  logout/reload so Config.wtf always keeps the player's values.
-]]
+-- The API cannot trace lines of sight, so openness is inferred from what the client reports.
 
 local ADDON_NAME, ns = ...
 ns.version = "1.0.0"
-
----------------------------------------------------------------------------
--- Static data
----------------------------------------------------------------------------
 
 ns.BANDS = { "far", "mid", "near" }
 ns.BAND_INFO = {
@@ -31,9 +10,7 @@ ns.BAND_INFO = {
     near = { label = "Near", color = { 0.45, 0.90, 0.45 }, desc = "Ground clutter and characters around you." },
 }
 
--- Known view-distance CVars. Any not present in this client are skipped.
---   menu  : true if a graphics-menu control normally drives it; false = console only.
---   floor : absolute lowest value Sightline will write.
+-- menu: the graphics menu has a control for it. floor: never written lower than this.
 ns.CVAR_DEFS = {
     { name = "farclip",          label = "View distance",           band = "far",  floor = 185, int = true,  menu = true  },
     { name = "horizonStart",     label = "Horizon start",           band = "far",  floor = 100, int = true,  menu = false },
@@ -54,7 +31,7 @@ ns.ENVIRONMENTS = {
     { key = "underwater",   label = "Underwater" },
 }
 
--- Capital cities: one openness value each, turned into per-band scales.
+-- shortcut: Classic map IDs and English zone names, update both if Forever's differ.
 local CITY_BY_MAPID = {
     [1453] = 0.55, -- Stormwind City
     [1454] = 0.60, -- Orgrimmar
@@ -68,7 +45,6 @@ local CITY_BY_NAME = {
     ["Thunder Bluff"]  = 0.90, ["Darnassus"] = 0.65, ["Undercity"] = 0.35,
 }
 
--- How much each band drops when openness falls. Far drops fully, near barely.
 local BAND_SENSITIVITY = { far = 1.00, mid = 0.50, near = 0.15 }
 
 function ns.BandsFromOpenness(o)
@@ -94,49 +70,44 @@ local DEFAULTS = {
         indoors      = { far = 0.30, mid = 0.60, near = 0.95 },
         underwater   = { far = 0.35, mid = 0.50, near = 0.80 },
     },
-    cvarSettings  = {},  -- [name] = { enabled = bool, band = "far"|"mid"|"near" }
-    customCVars   = {},  -- list of extra CVar names
-    engineMax     = {},  -- [cvar] = highest value the game's graphics menu uses
+    cvarSettings  = {},
+    customCVars   = {},
+    engineMax     = {},
     setupDone     = false,
-    zoneOverrides = {},  -- ["Zone|Subzone"] or ["Zone|*"] = openness 0..1
+    zoneOverrides = {},
     baselines     = {},
     minimap       = { hide = false, angle = 215 },
     window        = {},
     fps = {
         enabled       = false,
-        target        = 60,    -- frames per second to aim for
-        tolerance     = 0.10,  -- within +/-10% of target counts as "close"
-        gain          = 0.05,  -- a test must improve FPS by 5% (and at least 2 fps) to count
-        sampleTime    = 4,     -- seconds of FPS averaged per measurement
-        minFactor     = 0.50,  -- lowest FPS adjustment (50% of the scaled values)
-        allowAbove    = false, -- may raise values above the player's own settings
-        maxFactor     = 1.30,  -- highest FPS adjustment when allowAbove is on
+        target        = 60,
+        tolerance     = 0.10,
+        gain          = 0.05,
+        sampleTime    = 4,
+        minFactor     = 0.50,
+        allowAbove    = false,
+        maxFactor     = 1.30,
         pauseInCombat = true,
-        autoCalibrate = true,  -- calibrate every subzone even without a target FPS
-        minFps        = 60,    -- goal when no target FPS is set
-        verifyBackground = true, -- double-check low readings with the background FPS cap off
+        autoCalibrate = true,
+        minFps        = 60,
+        verifyBackground = true,
     },
-    calibrations = {},         -- ["zone|subzone|env"] = { factor, fps, status, locked, ... }
+    calibrations = {},
 }
 
--- How strongly the FPS adjustment applies to each band. Far settings cost the
--- most to draw and are least noticed; near settings are what you look at.
+-- far settings cost the most to draw and are noticed least
 local FPS_WEIGHT = { far = 1.00, mid = 0.80, near = 0.60 }
 ns.DEFAULTS = DEFAULTS
 
----------------------------------------------------------------------------
--- State shared with the GUI
----------------------------------------------------------------------------
-
-ns.specs  = {}   -- all known CVars (defaults + custom), with player settings applied
-ns.active = {}   -- specs that are enabled and exist in this client
+ns.specs  = {}
+ns.active = {}
 ns.state = {
     envKey = "open", envLabel = "Open world",
     zone = "", subzone = "",
     target  = { far = 1, mid = 1, near = 1 },
     current = { far = 1, mid = 1, near = 1 },
     applied = { far = 1, mid = 1, near = 1 },
-    envBands = { far = 1, mid = 1, near = 1 }, -- before the FPS adjustment
+    envBands = { far = 1, mid = 1, near = 1 },
     lastWrite = 0,
     fps = {
         status = "Off", factor = 1, calibrated = false,
@@ -149,10 +120,6 @@ ns.state = {
 local db
 local lastApplied = {}
 local elapsed = 0
-
----------------------------------------------------------------------------
--- Helpers
----------------------------------------------------------------------------
 
 function ns.Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffffd100Sightline:|r " .. tostring(msg))
@@ -198,10 +165,6 @@ function ns.ZoneKeys()
     local sub = GetSubZoneText() or ""
     return zone .. "|" .. sub, zone .. "|*", zone, sub
 end
-
----------------------------------------------------------------------------
--- CVar discovery and baselines
----------------------------------------------------------------------------
 
 local function BuildSpecs()
     wipe(ns.specs)
@@ -261,23 +224,11 @@ function ns.RestoreBaselines()
     end
 end
 
--- Call after changing which CVars are managed, their bands, or custom CVars.
 function ns.RebuildCVars()
     ns.RestoreBaselines()
     DiscoverCVars()
     ns.Refresh()
 end
-
----------------------------------------------------------------------------
--- Engine maximum
---
--- The addon API has no way to ask for a setting's maximum, so Sightline asks
--- the game's own graphics menu: it briefly sets the menu's view distance,
--- environment detail and ground clutter to their top level, reads the values
--- the game picks for each distance setting, then puts the menu back. Where the
--- player's own value is already higher (set via the console), theirs counts
--- as the maximum.
----------------------------------------------------------------------------
 
 local PRESETS = { "graphicsViewDistance", "graphicsEnvironmentDetail", "graphicsGroundClutter" }
 
@@ -333,10 +284,6 @@ function ns.UndoEngineMax()
     db.previousBaselines = nil
 end
 
----------------------------------------------------------------------------
--- Environment detection
----------------------------------------------------------------------------
-
 local function EnvLabel(key)
     for _, e in ipairs(ns.ENVIRONMENTS) do if e.key == key then return e.label end end
     return key
@@ -368,11 +315,6 @@ local function ComputeEnvironment()
     return "open", EnvLabel("open"), db.profiles.open
 end
 
----------------------------------------------------------------------------
--- Scaling
----------------------------------------------------------------------------
-
--- Value a CVar gets for the given band scales.
 local function ValueFor(spec, bands)
     local base = db.baselines[spec.name]
     if not base then return nil end
@@ -420,23 +362,6 @@ local function NeedsWrite()
     end
     return false
 end
-
----------------------------------------------------------------------------
--- FPS calibration
---
--- Every spot (zone + subzone + environment) gets its own calibration: an
--- adjustment on top of the surroundings-based scaling, saved between sessions.
--- Goal: at least db.fps.minFps (default 60), or around db.fps.target when a
--- target FPS is set.
---
--- Entering a spot with no calibration: measure FPS, then test one step at a
--- time until FPS meets the goal or a limit is reached.
---   * a lower step is kept only if FPS rose noticeably, otherwise reverted
---   * a higher step is kept only if FPS stays at the goal, otherwise reverted
--- Calibrated spots keep being watched. If FPS falls below the goal, the spot
--- is recalibrated starting from its stored value; if that gives no real gain,
--- the stored value stays. Locked calibrations are never changed automatically.
----------------------------------------------------------------------------
 
 local EPS = 0.001
 local TRIAL_STEP = 0.10
@@ -724,7 +649,6 @@ function ns.ClearCalibrations()
     ns.Refresh()
 end
 
--- Band scales after the FPS adjustment.
 local function ApplyFpsFactor(bands, factor)
     local out = {}
     for _, b in ipairs(ns.BANDS) do
@@ -743,8 +667,7 @@ local function Tick()
     st.envKey, st.envLabel = envKey, label
     for _, b in ipairs(ns.BANDS) do st.envBands[b] = Clamp(bands[b] or 1, db.minScale, 1) end
 
-    -- "Landed" = the values in use have reached their target, so FPS readings
-    -- reflect the current setting rather than a transition.
+    -- FPS readings only count once the values in use have reached their target
     local landed = true
     for _, b in ipairs(ns.BANDS) do
         if st.current[b] ~= st.target[b] or st.applied[b] ~= st.target[b] then landed = false end
@@ -767,7 +690,6 @@ local function Tick()
     if NeedsWrite() then ApplyBands(st.current) end
 end
 
--- Run a check now instead of waiting for the next tick.
 function ns.Refresh()
     elapsed = db and db.tickInterval or 0
 end
@@ -799,10 +721,6 @@ function ns.ResetSettings()
     ns.Refresh()
 end
 
----------------------------------------------------------------------------
--- Frame, events
----------------------------------------------------------------------------
-
 local frame = CreateFrame("Frame")
 frame:SetScript("OnUpdate", function(_, dt)
     elapsed = elapsed + dt
@@ -828,6 +746,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         ns.OnLogin()
 
     elseif event == "PLAYER_LOGOUT" then
+        -- the game saves settings on exit, so they must be the player's own by then
         ns.RestoreBkCap()
         ns.RestoreBaselines()
 
@@ -840,10 +759,6 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         ns.Refresh()
     end
 end)
-
----------------------------------------------------------------------------
--- Slash commands
----------------------------------------------------------------------------
 
 SLASH_SIGHTLINE1 = "/sightline"
 SLASH_SIGHTLINE2 = "/sight"
