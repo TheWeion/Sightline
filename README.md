@@ -140,12 +140,12 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 The version is in `Sightline.toc` and `Core.lua`. To cut a release:
 
-1. Set the new version in both, and commit it as `chore(release): 1.0.1`.
+1. Set the new version in both, add its notes to the top of `CHANGELOG.md`, and commit it
+   as `chore(release): 1.0.1`.
 2. Tag that commit and push the tag: `git tag v1.0.1 && git push origin v1.0.1`.
 3. `release.yml` checks the tag against the version, runs the tests, packages the addon
    (`.pkgmeta` says what stays out of the zip) and publishes a GitHub Release with the zip
-   and the commits since the last tag. A tag with `alpha` or `beta` in it makes a
-   pre-release.
+   and the changelog. A tag with `alpha` or `beta` in it makes a pre-release.
 4. CurseForge packages the same tag itself, told of the push by the repository's webhook,
    and reads the same `.pkgmeta`.
 

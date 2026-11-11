@@ -1,5 +1,9 @@
 package-as: Sightline
 
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
 ignore:
   - .github
   - docs
