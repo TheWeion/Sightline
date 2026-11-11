@@ -42,9 +42,11 @@ ceiling, and they are put back when you log out.
 
 ## Installing
 
-Download this repository (**Code**, then **Download ZIP**), rename the folder to `Sightline`
-and copy it into your Forever client's `Interface/AddOns` folder, so that `Sightline.toc` is
-at `Interface/AddOns/Sightline/Sightline.toc`. Restart the game.
+Releases go to CurseForge and to this repository's
+[Releases](https://github.com/TheWeion/Sightline/releases) page. To install by hand, download
+the zip from the latest release and unzip it into your Forever client's `Interface/AddOns`
+folder, so that `Sightline.toc` is at `Interface/AddOns/Sightline/Sightline.toc`. Restart the
+game.
 
 The first time you log in, Sightline asks whether to start from the engine maximum or from
 the view distances you have now.
@@ -133,6 +135,22 @@ lua5.1 tests/sim.lua
 ```
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org).
+
+### Releasing
+
+The version is in `Sightline.toc` and `Core.lua`. To cut a release:
+
+1. Set the new version in both, and commit it as `chore(release): 1.0.1`.
+2. Tag that commit and push the tag: `git tag v1.0.1 && git push origin v1.0.1`.
+3. `release.yml` checks the tag against the version, runs the tests, packages the addon
+   (`.pkgmeta` says what stays out of the zip) and publishes a GitHub Release with the zip
+   and the commits since the last tag. A tag with `alpha` or `beta` in it makes a
+   pre-release.
+4. CurseForge packages the same tag itself, told of the push by the repository's webhook,
+   and reads the same `.pkgmeta`.
+
+Running the workflow by hand (**Actions**, **release**, **Run workflow**) packages without
+publishing: the zip is attached to the run.
 
 ## Licence
 
