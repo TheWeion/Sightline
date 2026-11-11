@@ -1,0 +1,53 @@
+name: release
+
+# Publishes a GitHub Release for a pushed version tag: checks that the tag is the version in
+# the files (v1.0.0 for 1.0.0), runs the tests, and packages the addon with the BigWigs
+# packager, which reads .pkgmeta as CurseForge's own packager does. A tag with "alpha" or
+# "beta" in it makes a pre-release. How to cut one: "Releasing" in the README.
+#
+# Nothing is uploaded to CurseForge from here: its packager builds the same tag itself when
+# the repository's webhook tells it about the push.
+#
+# Triggers:
+#   - push of a `v*` tag  → packages AND publishes the release
+#   - workflow_dispatch   → packages only; the zip is attached to the run, so the pipeline
+#                           can be tried without cutting a release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the release notes are the commits since the previous tag
+
+      - name: Check the version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^## Version: //p' Sightline.toc)
+          echo "Sightline.toc has $version, the tag is $GITHUB_REF_NAME"
+          test "v$version" = "$GITHUB_REF_NAME"
+          grep -qF "ns.version = \"$version\"" Core.lua
+
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - run: lua5.1 tests/sim.lua
+
+      - uses: BigWigsMods/packager@v2
+        with:
+          args: ${{ github.ref_type != 'tag' && '-d' || '' }}
+        env:
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type != 'tag'
+        with:
+          name: Sightline
+          path: .release/*.zip
