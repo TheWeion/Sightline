@@ -307,92 +307,57 @@ end
 ---------------------------------------------------------------------------
 
 local PRESETS = { "graphicsViewDistance", "graphicsEnvironmentDetail", "graphicsGroundClutter" }
-local PRESET_TOP = 10
 
-local function After(seconds, fn)
-    if C_Timer and C_Timer.After then C_Timer.After(seconds, fn) else fn() end
-end
-
-local function ForceRewrite()
-    for _, b in ipairs(ns.BANDS) do ns.state.applied[b] = -1 end
-    ns.Refresh()
-end
-
-function ns.DetectEngineMax(callback)
+-- shortcut: the API cannot report a setting's maximum, so read what the graphics menu's top
+-- level (10) gives each one; revisit if Forever's menu stops driving these settings.
+function ns.DetectEngineMax(done)
     if ns.busy then return end
     ns.busy = true
     ns.RestoreBaselines()
-
     local saved = {}
-    for _, p in ipairs(PRESETS) do
-        local v = ReadCVar(p)
-        if v then saved[p] = v; WriteCVar(p, PRESET_TOP) end
+    for _, preset in ipairs(PRESETS) do
+        saved[preset] = ReadCVar(preset)
+        if saved[preset] then WriteCVar(preset, 10) end
     end
-
-    After(1.0, function()
-        local found = {}
+    C_Timer.After(1, function()
         for _, spec in ipairs(ns.active) do
-            local atTop = ReadCVar(spec.name) or 0
-            found[spec.name] = math.max(atTop, db.baselines[spec.name] or 0)
+            db.engineMax[spec.name] = math.max(ReadCVar(spec.name), db.baselines[spec.name])
         end
-        for p, v in pairs(saved) do WriteCVar(p, v) end
-
-        -- Restoring the menu can reset the distance settings to its own
-        -- values, so put the player's values back afterwards.
-        After(1.0, function()
-            for _, spec in ipairs(ns.active) do
-                local base = db.baselines[spec.name]
-                if base then WriteCVar(spec.name, base) end
-                db.lastApplied[spec.name] = nil
-            end
-            for name, v in pairs(found) do db.engineMax[name] = v end
+        for preset, level in pairs(saved) do WriteCVar(preset, level) end
+        -- putting the menu back resets the distances to its own values, not the player's
+        C_Timer.After(1, function()
+            ns.RestoreBaselines()
             db.engineMaxTime = time()
             ns.busy = false
-            ForceRewrite()
-            if callback then callback(found) end
+            ns.Refresh()
+            if done then done() end
         end)
     end)
 end
 
--- Make the given values the player's 100% (their "global" values).
 local function SetBaselines(values)
     for _, spec in ipairs(ns.active) do
-        local v = values[spec.name]
-        if v then
-            WriteCVar(spec.name, v)
-            db.baselines[spec.name] = ReadCVar(spec.name) or v
-            db.lastApplied[spec.name] = nil
+        if values[spec.name] then
+            WriteCVar(spec.name, values[spec.name])
+            db.baselines[spec.name] = ReadCVar(spec.name)
         end
     end
-    -- Calibrations were made against the old values.
-    if ns.RecalibrateAll then ns.RecalibrateAll() end
-    ForceRewrite()
+    ns.RestoreBaselines()
+    ns.RecalibrateAll()
 end
 
-function ns.ApplyEngineMax()
-    local any = false
-    for _, spec in ipairs(ns.active) do if db.engineMax[spec.name] then any = true end end
-    if not any then return false end
-    local prev = {}
-    for _, spec in ipairs(ns.active) do prev[spec.name] = db.baselines[spec.name] end
-    db.previousBaselines = prev
-    SetBaselines(db.engineMax)
-    return true
+function ns.UseEngineMax(done)
+    ns.DetectEngineMax(function()
+        db.previousBaselines = db.previousBaselines or CopyTable(db.baselines)
+        SetBaselines(db.engineMax)
+        if done then done() end
+    end)
 end
 
 function ns.UndoEngineMax()
-    if not db.previousBaselines then return false end
+    if not db.previousBaselines then return end
     SetBaselines(db.previousBaselines)
     db.previousBaselines = nil
-    return true
-end
-
--- Detect (if needed) and apply in one go, e.g. from the first-run dialog.
-function ns.UseEngineMax(callback)
-    ns.DetectEngineMax(function()
-        ns.ApplyEngineMax()
-        if callback then callback() end
-    end)
 end
 
 ---------------------------------------------------------------------------

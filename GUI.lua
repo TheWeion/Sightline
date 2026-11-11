@@ -1184,24 +1184,20 @@ local function BuildSettings(tab, c)
 
     local bW = 200
     local useMax = Button(glob, "Set all to engine maximum", bW, function()
-        if next(db().engineMax) == nil then
-            status:SetText("|cffffd100Detecting the engine maximum...|r")
-            ns.UseEngineMax(function() ns.Print("view distances set to the engine maximum"); tab.Refresh() end)
-        elseif ns.ApplyEngineMax() then
-            ns.Print("view distances set to the engine maximum"); tab.Refresh()
-        end
+        ns.UseEngineMax(function() ns.Print("view distances set to the engine maximum"); tab.Refresh() end)
     end)
     useMax:SetPoint("BOTTOMLEFT", 12, 10)
     Tooltip(useMax, "Set all to engine maximum",
         "Make the engine maximum your 100%. Sightline still scales it down wherever you can't see far, and calibration keeps your FPS up. Every place is recalibrated.")
     local detect = Button(glob, "Detect maximum again", bW, function()
-        status:SetText("|cffffd100Detecting the engine maximum...|r")
-        ns.DetectEngineMax(function() tab.Refresh() end)
+        ns.DetectEngineMax(tab.Refresh)
     end)
     detect:SetPoint("LEFT", useMax, "RIGHT", 10, 0)
     Tooltip(detect, "Detect maximum again", "Takes about two seconds. Your settings are put back afterwards.")
     local undo = Button(glob, "Undo", 120, function()
-        if ns.UndoEngineMax() then ns.Print("previous view distances restored"); tab.Refresh() end
+        ns.UndoEngineMax()
+        ns.Print("previous view distances restored")
+        tab.Refresh()
     end)
     undo:SetPoint("LEFT", detect, "RIGHT", 10, 0)
     Tooltip(undo, "Undo", "Go back to the values you had before setting the engine maximum.")
@@ -1235,7 +1231,7 @@ local function BuildSettings(tab, c)
             status:SetText("Engine maximum detected " .. Ago(d.engineMaxTime) .. "." ..
                 (d.previousBaselines and "   Undo returns to your earlier values." or ""))
         else
-            status:SetText("Engine maximum not detected yet. 'Set all to engine maximum' detects it first.")
+            status:SetText("Engine maximum not detected yet.")
         end
         if undo.SetEnabled then undo:SetEnabled(d.previousBaselines ~= nil) end
         if detect.SetEnabled then detect:SetEnabled(not ns.busy) end
