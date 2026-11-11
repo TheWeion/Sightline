@@ -1,0 +1,8 @@
+package-as: Sightline
+
+ignore:
+  - .github
+  - docs
+  - tests
+  - Media/Icon.svg
+  - README.md
