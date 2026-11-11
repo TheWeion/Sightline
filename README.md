@@ -133,3 +133,9 @@ lua5.1 tests/sim.lua
 ```
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org).
+
+## Licence
+
+Copyright (C) 2026 TheWeion. Sightline is free software: you can redistribute it and modify
+it under the terms of the [GNU General Public License, version 3](LICENCE). It comes with no
+warranty.

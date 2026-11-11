@@ -63,3 +63,5 @@ are, and it puts your own settings back when you log out.
 ## Source and feedback
 
 Source code, bug reports and ideas: [github.com/TheWeion/Sightline](https://github.com/TheWeion/Sightline)
+
+Sightline is free software under the GNU General Public License, version 3.
