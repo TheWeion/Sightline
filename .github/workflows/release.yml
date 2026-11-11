@@ -1,9 +1,10 @@
 name: release
 
 # Publishes a GitHub Release for a pushed version tag: checks that the tag is the version in
-# the files (v1.0.0 for 1.0.0), runs the tests, and packages the addon with the BigWigs
-# packager, which reads .pkgmeta as CurseForge's own packager does. A tag with "alpha" or
-# "beta" in it makes a pre-release. How to cut one: "Releasing" in the README.
+# the files (v1.0.0 for 1.0.0) and has its notes in CHANGELOG.md, runs the tests, and packages
+# the addon with the BigWigs packager, which reads .pkgmeta as CurseForge's own packager does.
+# A tag with "alpha" or "beta" in it makes a pre-release. How to cut one: "Releasing" in the
+# README.
 #
 # Nothing is uploaded to CurseForge from here: its packager builds the same tag itself when
 # the repository's webhook tells it about the push.
@@ -27,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0 # the release notes are the commits since the previous tag
+          fetch-depth: 0 # the packager reads the tags
 
       - name: Check the version
         if: github.ref_type == 'tag'
@@ -36,6 +37,7 @@ jobs:
           echo "Sightline.toc has $version, the tag is $GITHUB_REF_NAME"
           test "v$version" = "$GITHUB_REF_NAME"
           grep -qF "ns.version = \"$version\"" Core.lua
+          grep -qF "## $version" CHANGELOG.md
 
       - run: sudo apt-get update && sudo apt-get install -y lua5.1
       - run: lua5.1 tests/sim.lua
@@ -51,3 +53,4 @@ jobs:
         with:
           name: Sightline
           path: .release/*.zip
+          include-hidden-files: true # .release counts as hidden
