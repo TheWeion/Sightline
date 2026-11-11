@@ -1,4 +1,4 @@
-## Interface: 11507, 16001
+## Interface: 16001
 ## Title: |cffffd100Sightline|r
 ## Notes: Adaptive view distance. Scales each view-distance setting to how much of the world you can actually see.
 ## Author: TheWeion
