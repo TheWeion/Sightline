@@ -1,0 +1,17 @@
+name: ci
+
+# Plays through the addon against a stand-in for the game's API (tests/sim.lua), on Lua 5.1,
+# the version the game runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - run: lua5.1 tests/sim.lua
