@@ -150,10 +150,8 @@ ns.state = {
     pending = false,
     lastWrite = 0,
     fps = {
-        status = "Off", phase = "idle", key = nil, zone = nil, calibrated = false,
-        factor = 1, trial = nil, trialDir = nil,
-        avg = nil, before = nil,
-        sum = 0, count = 0,
+        status = "Off", factor = 1, calibrated = false,
+        sum = 0, count = 0, confirm = 0, holdUntil = 0,
         cooldownDown = 0, cooldownUp = 0,
         history = {},
     },
@@ -505,32 +503,35 @@ end
 ---------------------------------------------------------------------------
 
 local EPS = 0.001
+local TRIAL_STEP = 0.10
+local SETTLE_SECONDS = 2.5 -- terrain streams in after a change, so FPS right after one is noise
+local RETRY_SECONDS = 90
+local RECHECK_SECONDS = 3
+local IN_BACKGROUND = "Paused: game in background"
+local CHECKING = "Checking a low reading"
 
-function ns.PlaceName(c)
-    if not c then return "?" end
-    local name = (c.zone ~= "" and c.zone or "Unknown")
-    if c.subzone and c.subzone ~= "" then name = name .. " - " .. c.subzone end
+function ns.PlaceName(place)
+    local name = place.zone ~= "" and place.zone or "Unknown"
+    if place.subzone ~= "" then name = name .. " - " .. place.subzone end
     return name
 end
 
 local function FpsLog(msg)
-    local h = ns.state.fps.history
-    local place = ns.PlaceName({ zone = ns.state.zone, subzone = ns.state.subzone })
-    table.insert(h, 1, date("%H:%M") .. "  " .. place .. ": " .. msg)
-    while #h > 12 do table.remove(h) end
+    local history = ns.state.fps.history
+    table.insert(history, 1, date("%H:%M") .. "  " .. ns.PlaceName(ns.state) .. ": " .. msg)
+    history[13] = nil
     Debug("FPS: " .. msg)
 end
 
 local function ResetSamples()
     local fs = ns.state.fps
-    fs.sum, fs.count = 0, 0
+    fs.sum, fs.count, fs.min, fs.max = 0, 0, nil, nil
 end
 
 function ns.CalibrationActive()
     return db.enabled and (db.fps.enabled or db.fps.autoCalibrate)
 end
 
--- goal, lower bound, upper bound, mode
 function ns.FpsGoal()
     local f = db.fps
     if f.enabled then
@@ -540,84 +541,72 @@ function ns.FpsGoal()
 end
 
 function ns.MaxFpsFactor()
-    -- Going above the player's own settings is only offered with a target FPS.
-    return (db.fps.enabled and db.fps.allowAbove) and db.fps.maxFactor or 1.0
+    return db.fps.enabled and db.fps.allowAbove and db.fps.maxFactor or 1
 end
 
 function ns.FpsFactor()
     local fs = ns.state.fps
-    if not ns.CalibrationActive() then return 1 end
-    return fs.trial or fs.factor
+    return ns.CalibrationActive() and (fs.trial or fs.factor) or 1
+end
+
+function ns.FpsCaps()
+    local function cap(value, use)
+        local v = ReadCVar(value)
+        if v and v > 0 and ReadCVar(use) ~= 0 then return v end
+    end
+    return cap("maxFPS", "useMaxFPS"), cap("maxFPSBk", "useMaxFPSBk")
+end
+
+local function AtCap(fps, cap)
+    return math.abs(fps - cap) <= math.max(1.5, cap * 0.03)
 end
 
 local function Pc(x) return math.floor(x * 100 + 0.5) end
 
+function ns.RestoreBkCap()
+    local fs = ns.state.fps
+    if fs.capOff then
+        WriteCVar("useMaxFPSBk", 1)
+        fs.capOff = nil
+    end
+end
+
+local function StopTests(status)
+    local fs = ns.state.fps
+    fs.status, fs.trial, fs.confirm = status, nil, 0
+    ns.RestoreBkCap()
+    ResetSamples()
+end
+
 local function SaveCal(calStatus)
     local fs, st = ns.state.fps, ns.state
-    if not fs.key then return end
     local c = db.calibrations[fs.key]
     if not c then
         c = { zone = st.zone, subzone = st.subzone, env = st.envKey, envLabel = st.envLabel, tests = 0 }
         db.calibrations[fs.key] = c
     end
-    c.factor = math.floor(fs.factor * 100 + 0.5) / 100
-    if fs.avg then c.fps = math.floor(fs.avg * 10 + 0.5) / 10 end
-    c.goal = (ns.FpsGoal())
-    c.status = calStatus
-    c.updated = time()
-    c.pending = nil
+    c.factor, c.fps, c.goal = fs.factor, fs.avg, ns.FpsGoal()
+    c.status, c.updated, c.pending = calStatus, time(), nil
 end
 
--- Background FPS cap (useMaxFPSBk) ----------------------------------------
--- Addons can't tell whether the game window is in the background. When a
--- reading is low and the background cap is on, Sightline checks it first:
---   1. Wait for FPS to settle (cap still on), then watch it for a moment.
---      Holding steady at maxFPSBk = the game is in the background: no change.
---   2. Otherwise turn the cap off, wait, and measure again. Back to normal =
---      the drop didn't last: no change. Still low = a real drop: recalibrate,
---      with the cap off so an alt-tab can't spoil the tests.
--- The cap is switched back on as soon as that's finished, and on logout or
--- reload.
-
-local function BkCapOn() return ReadCVar("useMaxFPSBk") == 1 end
-
-local function DisableBkCap(now)
+local function Settle(status, calStatus)
     local fs = ns.state.fps
-    WriteCVar("useMaxFPSBk", 0)
-    db.bkRestore = true
-    fs.bkOverride, fs.bkSince = true, now
-end
-
-function ns.RestoreBkCap()
-    if db and db.bkRestore then
-        WriteCVar("useMaxFPSBk", 1)
-        db.bkRestore = nil
+    StopTests(status)
+    if not fs.calibrated then
+        FpsLog(("calibrated at %d%% (%.0f fps)"):format(Pc(fs.factor), fs.avg))
+        fs.calibrated = true
     end
-    local fs = ns.state.fps
-    fs.bkOverride, fs.verifying, fs.verifyUntil = nil, nil, nil
-    fs.check, fs.cmin, fs.cmax = nil, nil, nil
-end
-
-local function Settle(live, calStatus)
-    local fs = ns.state.fps
-    fs.status = live
-    fs.lowCount = 0
-    ns.RestoreBkCap()
-    if not fs.calibrated then FpsLog(("calibrated at %d%% (%.0f fps)"):format(Pc(fs.factor), fs.avg or 0)) end
-    fs.calibrated = true
     SaveCal(calStatus)
 end
 
 local function StartTrial(dir)
-    local f, fs = db.fps, ns.state.fps
-    fs.before = fs.avg
+    local fs = ns.state.fps
+    local highest = dir == "restore" and 1 or ns.MaxFpsFactor()
     fs.trialDir = dir
-    local hi = dir == "restore" and 1 or ns.MaxFpsFactor()
-    fs.trial = Clamp(math.floor((fs.factor + (dir == "down" and -f.step or f.step)) * 100 + 0.5) / 100, f.minFactor, hi)
-    fs.phase = "trial"
+    fs.trial = Clamp(Pc(fs.factor + (dir == "down" and -TRIAL_STEP or TRIAL_STEP)) / 100, db.fps.minFactor, highest)
     ResetSamples()
-    local verb = dir == "restore" and "Restoring"
-        or (fs.calibrated and (dir == "down" and "Recalibrating" or "Fine-tuning") or "Calibrating")
+    local verb = dir == "restore" and "Restoring" or not fs.calibrated and "Calibrating"
+        or dir == "down" and "Recalibrating" or "Fine-tuning"
     fs.status = ("%s: testing %d%%"):format(verb, Pc(fs.trial))
     local c = db.calibrations[fs.key]
     if c and fs.calibrated and dir == "down" then c.status = "Recalibrating" end
@@ -625,76 +614,71 @@ end
 
 local function FinishTrial(avg, now)
     local f, fs = db.fps, ns.state.fps
-    local goal, low, high, mode = ns.FpsGoal()
-    local before = fs.before or avg
-    local c = db.calibrations[fs.key]
-    if c then c.tests = (c.tests or 0) + 1 end
-
-    if fs.trialDir == "down" then
-        if avg - before >= math.max(2, before * f.gain) then
-            fs.factor = fs.trial
-            FpsLog(("lowered to %d%%: %.0f -> %.0f fps, kept"):format(Pc(fs.factor), before, avg))
-        else
-            fs.cooldownDown = now + f.failCooldown
-            FpsLog(("lowered to %d%%: %.0f -> %.0f fps, no real gain, reverted to %d%%"):format(Pc(fs.trial), before, avg, Pc(fs.factor)))
-            avg = before -- the stored value's reading still stands
-        end
-    elseif fs.trialDir == "restore" then
-        -- Lowering wasn't helping here, so take view distance back if it costs nothing.
-        if avg >= before - math.max(2, before * f.gain) then
-            fs.factor = fs.trial
-            FpsLog(("restored to %d%%: %.0f -> %.0f fps, no real cost, kept"):format(Pc(fs.factor), before, avg))
-        else
-            fs.cooldownUp = now + f.failCooldown
-            FpsLog(("restored to %d%%: %.0f -> %.0f fps, reverted to %d%%"):format(Pc(fs.trial), before, avg, Pc(fs.factor)))
-            avg = before
-        end
+    local goal, _, _, mode = ns.FpsGoal()
+    local dir, before = fs.trialDir, fs.avg
+    local noticeable = math.max(2, before * f.gain)
+    local kept
+    if dir == "down" then
+        kept = avg - before >= noticeable
+    elseif dir == "restore" then
+        kept = avg >= before - noticeable
     else
-        local keepAt = mode == "minimum" and goal or goal * (1 - f.tolerance / 2)
-        if avg >= keepAt then
-            fs.factor = fs.trial
-            FpsLog(("raised to %d%%: %.0f fps, kept"):format(Pc(fs.factor), avg))
-        else
-            fs.cooldownUp = now + f.failCooldown
-            FpsLog(("raised to %d%%: fell to %.0f fps, reverted to %d%%"):format(Pc(fs.trial), avg, Pc(fs.factor)))
-            avg = before
-        end
+        kept = avg >= (mode == "minimum" and goal or goal * (1 - f.tolerance / 2))
     end
-    fs.avg = avg
-    fs.trial, fs.trialDir = nil, nil
-    fs.phase = "measure"
-    ResetSamples()
-    if fs.calibrated then SaveCal(c and c.status or "Calibrated") end
+
+    local verb = dir == "down" and "lowered" or dir == "restore" and "restored" or "raised"
+    FpsLog(("%s to %d%%: %.0f -> %.0f fps, %s"):format(verb, Pc(fs.trial), before, avg,
+        kept and "kept" or ("reverted to %d%%"):format(Pc(fs.factor))))
+    if kept then
+        fs.factor, fs.avg = fs.trial, avg
+    elseif dir == "down" then
+        fs.cooldownDown = now + RETRY_SECONDS
+    else
+        fs.cooldownUp = now + RETRY_SECONDS
+    end
+    fs.trial = nil
+
+    local c = db.calibrations[fs.key]
+    if c then
+        c.tests = (c.tests or 0) + 1
+        if fs.calibrated then SaveCal(c.status) end
+    end
 end
 
-local function Decide(avg, now, verified)
-    local f, fs = db.fps, ns.state.fps
-    local goal, low, high, mode = ns.FpsGoal()
-    if not verified and avg < low and fs.calibrated and fs.wasOk and (fs.lowCount or 0) < 1 then
-        -- One low reading in a calibrated place could be a blip (a loading
-        -- hitch, a burst of spell effects). Only act on two in a row.
-        fs.lowCount = (fs.lowCount or 0) + 1
-        fs.status = "Checking a drop"
-        return
+-- A drop is measured again before anything is lowered, and once more with the background FPS
+-- cap off when that cap is on: an addon cannot tell whether the game is in the background.
+local function Confirmed(now)
+    local fs = ns.state.fps
+    if fs.confirm == 0 then
+        fs.confirm = 1
+    elseif fs.confirm == 1 and db.fps.verifyBackground and ReadCVar("useMaxFPSBk") == 1 then
+        fs.confirm = 2
+        fs.capOff = WriteCVar("useMaxFPSBk", 0)
+    else
+        return true
     end
-    if avg >= low then fs.lowCount = 0 end
-    fs.wasOk = avg >= low
+    fs.status, fs.holdUntil = CHECKING, now + RECHECK_SECONDS
+end
+
+local function Decide(avg, now)
+    local f, fs = db.fps, ns.state.fps
+    local _, low, high = ns.FpsGoal()
+    fs.avg = avg
     if avg < low then
         local atLowest = fs.factor <= f.minFactor + EPS
-        if atLowest or now < fs.cooldownDown then
-            -- Can't (usefully) go lower. If raising costs nothing, the
-            -- reduction isn't helping here, so take view distance back.
-            if fs.factor < 1 - EPS and now >= fs.cooldownUp then
-                StartTrial("restore")
-            elseif atLowest then
-                Settle("Below goal, at lowest allowed", "At lowest")
-            else
-                Settle("Below goal, lowering didn't help", "No gain")
-            end
+        if not atLowest and now >= fs.cooldownDown then
+            if Confirmed(now) then StartTrial("down") end
+        elseif fs.factor < 1 - EPS and now >= fs.cooldownUp then
+            StartTrial("restore")
+        elseif atLowest then
+            Settle("Below goal, at lowest allowed", "At lowest")
         else
-            StartTrial("down")
+            Settle("Below goal, lowering didn't help", "No gain")
         end
-    elseif avg > high and fs.factor < ns.MaxFpsFactor() - EPS and now >= fs.cooldownUp then
+        return
+    end
+    if fs.status == CHECKING then FpsLog(("drop didn't last (back to %.0f fps), no change"):format(avg)) end
+    if avg > high and fs.factor < ns.MaxFpsFactor() - EPS and now >= fs.cooldownUp then
         StartTrial("up")
     elseif avg > high then
         Settle(fs.factor >= 1 - EPS and "Above goal at full distance" or "Above goal, raising cost too much", "Calibrated")
@@ -704,229 +688,106 @@ local function Decide(avg, now, verified)
 end
 
 local function EnterSpot(key)
-    local fs, st = ns.state.fps, ns.state
-    ns.RestoreBkCap()
-    fs.key, fs.zone = key, st.zone
-    fs.trial, fs.trialDir, fs.before, fs.avg = nil, nil, nil, nil
-    fs.cooldownDown, fs.cooldownUp = 0, 0
-    fs.lowCount, fs.bgUntil, fs.wasOk = 0, nil, true
-    fs.phase = "measure"
-    ResetSamples()
+    local fs = ns.state.fps
     local c = db.calibrations[key]
-    if c then
-        fs.factor = c.factor or 1
-        fs.calibrated = not c.pending
-        fs.status = c.locked and "Locked" or (c.pending and "Recalibrating" or "Checking")
-    else
-        -- New spot: start from the normal scaled values.
-        fs.factor = 1
-        fs.calibrated = false
-        fs.status = "Calibrating"
-    end
-end
-
--- The game's frame-rate caps. maxFPSBk applies while the game is in the
--- background (alt-tabbed); readings pinned at it say nothing about the scene.
-function ns.FpsCaps()
-    local function cap(valueName, useName)
-        local v, use = ReadCVar(valueName), ReadCVar(useName)
-        if not v or v <= 0 or use == 0 then return nil end
-        return v
-    end
-    return cap("maxFPS", "useMaxFPS"), cap("maxFPSBk", "useMaxFPSBk")
-end
-
-local function AtCap(fps, cap)
-    return cap and math.abs(fps - cap) <= math.max(1.5, cap * 0.03)
+    StopTests(not c and "Calibrating" or c.locked and "Locked" or c.pending and "Recalibrating" or "Checking")
+    fs.key, fs.avg, fs.holdUntil, fs.cooldownDown, fs.cooldownUp = key, nil, 0, 0, 0
+    fs.factor = c and c.factor or 1
+    fs.calibrated = c ~= nil and not c.pending
 end
 
 local function FpsController(now, landed)
     local f, fs, st = db.fps, ns.state.fps, ns.state
     if not ns.CalibrationActive() then
-        ns.RestoreBkCap()
-        fs.factor, fs.trial, fs.trialDir, fs.phase, fs.key = 1, nil, nil, "idle", nil
-        fs.status = db.enabled and "Off" or "Paused"
-        ResetSamples()
+        StopTests(db.enabled and "Off" or "Paused")
+        fs.key, fs.factor = nil, 1
         return
     end
 
     local key = st.zone .. "|" .. st.subzone .. "|" .. st.envKey
     if key ~= fs.key then EnterSpot(key) end
-    if fs.bkOverride and now - (fs.bkSince or now) > 180 then ns.RestoreBkCap() end -- safety net
-
     local c = db.calibrations[key]
-    if c and c.locked and fs.factor ~= c.factor then fs.factor = c.factor end
+    if c and c.locked then fs.factor = c.factor end
+    fs.factor = Clamp(fs.factor, f.minFactor, ns.MaxFpsFactor())
 
     if f.pauseInCombat and UnitAffectingCombat("player") then
-        fs.status = "Paused in combat"
-        ResetSamples()
+        StopTests("Paused in combat")
         return
     end
-    if not landed or now - st.lastWrite < f.settleTime then
-        if fs.phase ~= "trial" and not (c and c.locked) then fs.status = fs.calibrated and "Settling" or "Calibrating" end
-        ResetSamples()
-        return
-    end
-
-    local goal, low = ns.FpsGoal()
-    local fgCap, bgCap = ns.FpsCaps()
-
-    -- Step 1 of checking a drop: let FPS settle with the background cap still
-    -- on, then see whether it is holding steady at maxFPSBk. If it is, the
-    -- game is in the background.
-    if fs.check == "settle" then
-        if now < fs.checkUntil then
-            ResetSamples()
-            return
-        end
-        local fps = GetFramerate()
-        fs.sum, fs.count = fs.sum + fps, fs.count + 1
-        fs.cmin = math.min(fs.cmin or fps, fps)
-        fs.cmax = math.max(fs.cmax or fps, fps)
-        if fs.count * db.tickInterval < f.bkProbe then return end
-
-        local avg = fs.sum / fs.count
-        local steady = (fs.cmax - fs.cmin) <= math.max(2, (bgCap or 0) * 0.06)
-        local pinned = BkCapOn() and bgCap and steady and AtCap(avg, bgCap)
-        fs.check, fs.cmin, fs.cmax = nil, nil, nil
-        ResetSamples()
-        if pinned then
-            FpsLog(("FPS holding at the background cap (%d): game is in the background, no change"):format(bgCap))
-            fs.lowCount, fs.wasOk = 0, true
-            -- Check less and less often while it lasts.
-            fs.quietSpan = math.min(300, (fs.quietSpan or 15) * 2)
-            fs.quietUntil = now + fs.quietSpan
-            fs.status = "Paused: game in background"
-            return
-        end
-        -- Step 2: not the background cap. Measure again with the cap off, so
-        -- an alt-tab during the measurement (or the tests after it) can't
-        -- spoil it.
-        DisableBkCap(now)
-        fs.verifying = true
-        fs.verifyUntil = now + f.bkWait
-        fs.status = "Checking a drop"
-        return
-    end
-
-    if fs.verifyUntil and now < fs.verifyUntil then
-        fs.status = "Checking a drop"
+    if not landed or now - st.lastWrite < SETTLE_SECONDS or now < fs.holdUntil then
         ResetSamples()
         return
     end
 
     local fps = GetFramerate()
-
-    fs.sum = fs.sum + fps
-    fs.count = fs.count + 1
+    fs.sum, fs.count = fs.sum + fps, fs.count + 1
+    fs.min, fs.max = math.min(fs.min or fps, fps), math.max(fs.max or fps, fps)
     if fs.count * db.tickInterval < f.sampleTime then return end
 
-    local avg = fs.sum / fs.count
+    local avg, spread = fs.sum / fs.count, fs.max - fs.min
     ResetSamples()
-
-    -- Held at your own FPS cap below the goal: view distance can't help.
-    if fgCap and fgCap < low and AtCap(avg, fgCap) then
-        fs.avg = avg
-        fs.trial, fs.trialDir, fs.phase = nil, nil, "measure"
-        fs.status = "Limited by your FPS cap"
-        return
-    end
+    local _, low = ns.FpsGoal()
+    local fgCap, bgCap = ns.FpsCaps()
 
     if c and c.locked then
         fs.avg = avg
-        fs.status = "Locked"
-        return
-    end
-    if fs.phase == "trial" then
-        FinishTrial(avg, now)
-        return
-    end
-
-    -- Result of a check with the background cap off.
-    if fs.verifying then
-        fs.verifying = nil
+        StopTests("Locked")
+    elseif fgCap and fgCap < low and AtCap(avg, fgCap) then
         fs.avg = avg
-        if avg >= low then
-            FpsLog(("drop didn't last (back to %.0f fps), no change"):format(avg))
-            ns.RestoreBkCap()
-            fs.lowCount, fs.wasOk = 0, true
-            fs.status = fs.calibrated and "On goal" or "Calibrating"
-            return
+        StopTests("Limited by your FPS cap")
+    elseif avg < low and bgCap and AtCap(avg, bgCap) and spread <= math.max(2, bgCap * 0.06) then
+        if fs.status ~= IN_BACKGROUND then
+            FpsLog(("holding at the background cap (%d fps): game is in the background"):format(bgCap))
         end
-        Decide(avg, now, true) -- genuinely low: recalibrate, cap stays off until done
-        return
+        StopTests(IN_BACKGROUND)
+    elseif fs.trial then
+        FinishTrial(avg, now)
+    else
+        Decide(avg, now)
     end
-
-    if avg >= low then fs.quietSpan, fs.quietUntil = nil, nil end
-
-    -- A low reading while the background cap is on: check it before acting.
-    if avg < low and f.verifyBackground and BkCapOn() and not fs.bkOverride then
-        if fs.quietUntil and now < fs.quietUntil then
-            fs.status = "Paused: game in background"
-            return
-        end
-        fs.check = "settle"
-        fs.checkUntil = now + f.bkSettle
-        fs.status = "Checking a drop"
-        return
-    end
-
-    fs.avg = avg
-    Decide(avg, now)
 end
-
--- Changes from the Calibrations tab ---------------------------------------
 
 function ns.CurrentCalKey() return ns.state.fps.key end
 
 function ns.SetCalibration(key, factor, locked)
     local c = db.calibrations[key]
-    if not c then return end
     if factor then
-        c.factor = Clamp(factor, db.fps.minFactor, math.max(1, ns.MaxFpsFactor()))
-        c.status = "Manual"
-        c.updated = time()
+        c.factor, c.status, c.updated = Clamp(factor, db.fps.minFactor, ns.MaxFpsFactor()), "Manual", time()
     end
     if locked ~= nil then
-        c.locked = locked and true or nil
+        c.locked = locked or nil
         if not locked and c.status == "Manual" then c.status = "Calibrated" end
     end
-    local fs = ns.state.fps
-    if key == fs.key then
-        fs.factor = c.factor
-        fs.trial, fs.trialDir, fs.phase = nil, nil, "measure"
-        ResetSamples()
+    if key == ns.state.fps.key then
+        ns.state.fps.factor = c.factor
+        StopTests(c.locked and "Locked" or "Checking")
     end
     ns.Refresh()
 end
 
 function ns.Recalibrate(key)
     local c = db.calibrations[key]
-    if not c then return end
-    c.pending, c.locked = true, nil
-    c.status = "Recalibrating"
-    if key == ns.state.fps.key then ns.state.fps.key = nil end -- re-enter with stored value as start
+    c.pending, c.locked, c.status = true, nil, "Recalibrating"
+    if key == ns.state.fps.key then ns.state.fps.key = nil end
     ns.Refresh()
+end
+
+function ns.RecalibrateAll()
+    for key, c in pairs(db.calibrations) do
+        if not c.locked then ns.Recalibrate(key) end
+    end
 end
 
 function ns.DeleteCalibration(key)
     db.calibrations[key] = nil
-    if key == ns.state.fps.key then
-        ns.state.fps.key = nil
-        ns.state.fps.factor = 1
-    end
+    if key == ns.state.fps.key then ns.state.fps.key = nil end
     ns.Refresh()
 end
 
 function ns.ClearCalibrations()
     wipe(db.calibrations)
     ns.state.fps.key = nil
-    ns.state.fps.factor = 1
     ns.Refresh()
-end
-
-function ns.RecalibrateAll()
-    for key in pairs(db.calibrations) do ns.Recalibrate(key) end
 end
 
 -- Band scales after the FPS adjustment.
